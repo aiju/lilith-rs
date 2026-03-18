@@ -1,5 +1,5 @@
 [build]
-target = "x86_64-lilith.json"
+target = "x86_64-lilith-kernel.json"
 
 [unstable]
 json-target-spec = true
