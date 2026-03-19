@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["cat"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

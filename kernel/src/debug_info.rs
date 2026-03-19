@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
-use x86_64::{VirtAddr, structures::paging::{PageTable, PageTableFlags}};
+use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::{PageTable, PageTableFlags}};
 
-use crate::{memory::memory_manager, serial_println};
+use crate::{memory::{PHYSICAL_MEMORY_OFFSET, memory_manager, phys_to_mut}, serial_println};
 
 struct MapRegion {
     virt_start: u64,
@@ -88,7 +88,7 @@ fn print_map(table: &PageTable, physical_memory_offset: VirtAddr) {
 // Utility function to print the entire page table in a convenient format
 #[allow(dead_code)]
 pub fn print_memory_map() {
-    let mut memory_manager = memory_manager().lock();
-    let physical_memory_offset = memory_manager.physical_memory_offset;
-    print_map(memory_manager.page_table.level_4_table(), physical_memory_offset);
+    let (current_table_frame, _) = Cr3::read();
+    let page_table: &mut PageTable = unsafe { phys_to_mut(current_table_frame.start_address()) };
+    print_map(page_table, PHYSICAL_MEMORY_OFFSET);
 }

@@ -1,2 +1,5 @@
-/target
+/cmd/target
 /kernel/target
+/host/target
+/target
+/fs.img

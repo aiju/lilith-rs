@@ -2,6 +2,9 @@ use core::fmt;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
+use x86_64::PhysAddr;
+
+use crate::memory::phys_to_mut;
 
 /// Unicode codepoints in ascending order (for binary search lookup).
 const UNICODE_TO_CP437_KEYS: [u16; 128] = [
@@ -157,7 +160,7 @@ lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        buffer: unsafe { phys_to_mut(PhysAddr::new(0xb8000)) },
     });
 }
 
