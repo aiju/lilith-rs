@@ -19,8 +19,6 @@ use x86_64::{
 pub struct MachGsSpace {
     pub kernel_rsp: u64,
     pub user_rsp: u64,
-    pub user_rip: u64,
-    pub user_rflags: u64,
 }
 
 pub struct Mach {
@@ -46,8 +44,6 @@ static mut MACH0: Mutex<Mach> = Mutex::new(Mach::new());
 static mut MACH_GS_SPACE: MachGsSpace = MachGsSpace {
     kernel_rsp: 0,
     user_rsp: 0,
-    user_rip: 0,
-    user_rflags: 0,
 };
 
 pub const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector(8);
