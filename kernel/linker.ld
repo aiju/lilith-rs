@@ -6,6 +6,7 @@ SECTIONS {
     . = KERNEL_OFFSET;
 
     .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_OFFSET) {
+        __text_start = .;
         *(.text.boot)
         *(.text .text.*)
     }
@@ -15,6 +16,7 @@ SECTIONS {
     }
 
     .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_OFFSET) {
+        __data_start = .;
         *(.data.rel.ro .data.rel.ro.*)
         *(.got .got.*)
         *(.data .data.*)

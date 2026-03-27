@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
 use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::{PageTable, PageTableFlags}};
 
-use crate::{memory::{PHYSICAL_MEMORY_OFFSET, memory_manager, phys_to_mut}, serial_println};
+use crate::{memory::{PHYSICAL_MEMORY_OFFSET, phys_to_mut}, serial_println};
 
 struct MapRegion {
     virt_start: u64,
@@ -16,6 +16,10 @@ fn canonicalize(addr: u64) -> u64 {
     } else {
         addr
     }
+}
+
+fn mask_flags(flags: PageTableFlags) -> PageTableFlags {
+    flags.difference(PageTableFlags::ACCESSED | PageTableFlags::DIRTY)
 }
 
 fn collect_mappings(
@@ -33,7 +37,7 @@ fn collect_mappings(
         if entry.flags().contains(PageTableFlags::HUGE_PAGE) || level == 1 {
             let page_size = 1u64 << (12 + 9 * (level - 1));
             let phys = entry.addr().as_u64();
-            let flags = entry.flags();
+            let flags = mask_flags(entry.flags());
 
             // Try to extend the previous region
             if let Some(last) = regions.last_mut() {

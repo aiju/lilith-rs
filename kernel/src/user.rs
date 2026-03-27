@@ -3,9 +3,8 @@ use core::arch::asm;
 use x86_64::VirtAddr;
 use xmas_elf::{ElfFile, program::SegmentData};
 
-use crate::{mach::{USER_CODE_SELECTOR, mach}, memory::AddressSpace, println};
+use crate::{mach::{USER_CODE_SELECTOR, mach}, memory::{AddressSpace, KERNEL_STACK_TOP}, println};
 
-pub const KERNEL_STACK_TOP: u64 = 0xFFFF_FFFF_A000_0000;
 pub const USER_STACK_BOTTOM: u64 = 0x0000_7FFF_0000_0000;
 pub const USER_STACK_SIZE: usize = 1048576;
 
@@ -60,8 +59,8 @@ pub unsafe fn go_to_userspace(proc: &'static mut Proc) -> ! {
     println!("go to user!!");
     unsafe {
         proc.address_space.activate();
-        mach().lock().tss.privilege_stack_table[0] = VirtAddr::new_unsafe(KERNEL_STACK_TOP);
-        mach().lock().gs_space_mut().kernel_rsp = KERNEL_STACK_TOP;
+        mach().lock().tss.privilege_stack_table[0] = KERNEL_STACK_TOP;
+        mach().lock().gs_space_mut().kernel_rsp = KERNEL_STACK_TOP.as_u64();
         asm!(
             "push {ds_sel}",     // SS
             "push {stack}",      // RSP
