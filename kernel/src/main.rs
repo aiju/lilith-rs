@@ -3,6 +3,7 @@
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
+#![feature(atomic_ptr_null)]
 
 mod debug_info;
 mod interrupts;
@@ -22,13 +23,10 @@ extern crate alloc;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use bootloader::{BootInfo, entry_point};
 
-use crate::{
-    ramfs::ram_fs,
-    user::{Proc, go_to_userspace},
-};
+use crate::{ramfs::ram_fs, user::Proc};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -41,16 +39,16 @@ fn panic(info: &PanicInfo) -> ! {
 fn os_main() {
     println!("╔═══════════╗\n║ LILITH OS ║\n╚═══════════╝\nBooting...");
 
-    let root_proc = Box::leak(Box::new(Proc::new().unwrap()));
+    let root_proc = Arc::new(Proc::new().unwrap());
+    let active_proc = root_proc.activate();
     let data = ram_fs().get("cat").unwrap();
-    root_proc.load_elf(data);
-    unsafe { go_to_userspace(root_proc) };
+    let entry = active_proc.load_elf(data);
+    unsafe { active_proc.go_to_userspace(entry) };
 }
 
 entry_point!(main);
 fn main(boot_info: &'static BootInfo) -> ! {
     unsafe {
-        println!("start");
         mach::init();
         interrupts::init();
         memory::init(boot_info);

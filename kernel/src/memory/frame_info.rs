@@ -7,6 +7,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 use crate::memory::{buddy::BuddyList, slub::SlabList};
 
+#[repr(C)] // need this to ensure that all fields start at offset 0
 pub(super) union FrameInfoData {
     none: (),
     pub(super) buddy_list: BuddyList,
@@ -33,7 +34,7 @@ const FRAME_FLAGS_TYPE_MASK: u64 = 0xFF;
 
 pub const FRAME_SIZE: usize = 4096;
 pub const FRAME_SHIFT: usize = 12;
-const FRAME_INFO_ADDR: VirtAddr = VirtAddr::new_truncate(0xFFFF_0000_0000_0000);
+const FRAME_INFO_ADDR: VirtAddr = VirtAddr::new_truncate(0xFFFF_9000_0000_0000);
 pub const FRAME_INFO_SHIFT: usize = core::mem::size_of::<FrameInfo>().ilog2() as usize;
 
 pub fn frame_info_addr(addr: PhysAddr) -> VirtAddr {
@@ -55,7 +56,7 @@ pub fn frame_info(addr: PhysAddr) -> &'static FrameInfo {
 }
 
 impl FrameInfo {
-    pub unsafe fn new_at(ptr: *mut FrameInfo) {
+    pub(super) unsafe fn new_at(ptr: *mut FrameInfo) {
         unsafe {
             let fi = FrameInfo {
                 flags: AtomicU64::new(FrameType::Reserved as u64),

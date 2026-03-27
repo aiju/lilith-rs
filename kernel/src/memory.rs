@@ -8,6 +8,7 @@ mod frame_info;
 mod slub;
 
 pub use address_space::AddressSpace;
+pub use address_space::page_fault_handler;
 pub use bootstrap::init;
 
 use crate::memory::{
@@ -24,6 +25,10 @@ pub const BOOT_INFO: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFF_9000_0000);
 
 pub const FRAME_LAYOUT: Layout =
     unsafe { Layout::from_size_align_unchecked(FRAME_SIZE, FRAME_SIZE) };
+
+pub fn is_user_address(virt: VirtAddr) -> bool {
+    virt.as_u64() >> 48 == 0
+}
 
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
     assert!(phys.as_u64() < PHYSICAL_MEMORY_MAX_SIZE as u64);
@@ -73,6 +78,11 @@ pub unsafe fn kernel_free(addr: VirtAddr) {
         frame_info::FrameType::Slab => unsafe { SLUB_ALLOCATOR.lock().free(addr) },
         _ => panic!("invalid address passed to kernel_free"),
     }
+}
+
+pub unsafe fn zero_frame(addr: PhysAddr) {
+    let virt = phys_to_virt(addr);
+    unsafe { core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, FRAME_SIZE) };
 }
 
 struct GlobalAlloc;

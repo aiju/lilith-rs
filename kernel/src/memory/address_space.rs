@@ -1,16 +1,20 @@
+use alloc::vec::Vec;
 use x86_64::{
     PhysAddr, VirtAddr,
-    registers::control::Cr3,
     structures::paging::{
         FrameAllocator as _, Mapper as _, OffsetPageTable, Page, PageTable, PageTableFlags,
-        PhysFrame, Size4KiB, Translate as _, page_table::PageTableEntry,
+        PhysFrame, Size4KiB, page_table::PageTableEntry,
     },
 };
 
 use crate::{
+    interrupts::TrapFrame,
+    mach::mach,
     memory::{
-        FRAME_LAYOUT, PHYSICAL_MEMORY_OFFSET, kernel_alloc, phys_to_virt, virt_to_phys,
+        FRAME_LAYOUT, PHYSICAL_MEMORY_OFFSET, frame_info::FRAME_SIZE, is_user_address,
+        kernel_alloc, phys_to_virt, virt_to_phys, zero_frame,
     },
+    println,
     sync::IrqLock,
 };
 
@@ -31,8 +35,14 @@ unsafe impl x86_64::structures::paging::FrameAllocator<Size4KiB> for FrameAlloca
     }
 }
 
+pub struct Mapping {
+    addr: VirtAddr,
+    size: usize,
+}
+
 pub struct AddressSpace {
     page_table: VirtAddr,
+    mappings: Vec<Mapping>,
 }
 
 impl AddressSpace {
@@ -47,24 +57,60 @@ impl AddressSpace {
         for i in 256..512 {
             new[i] = global[i].clone();
         }
-        Some(AddressSpace { page_table: addr })
+        Some(AddressSpace {
+            page_table: addr,
+            mappings: Vec::new(),
+        })
+    }
+
+    pub fn page_table_address(&self) -> PhysAddr {
+        virt_to_phys(self.page_table).unwrap()
+    }
+
+    pub fn add_mapping(&mut self, addr: VirtAddr, size: usize) {
+        self.mappings.push(Mapping { addr, size });
     }
 
     fn offset_page_table(&mut self) -> OffsetPageTable<'_> {
         unsafe { OffsetPageTable::new(&mut *self.page_table.as_mut_ptr(), PHYSICAL_MEMORY_OFFSET) }
     }
+}
 
-    pub unsafe fn ensure_allocated(&mut self, start: VirtAddr, len: usize) {
-        assert!(start.as_u64() >> 48 == 0);
-        let mut pt = self.offset_page_table();
-        let mut page = start.as_u64() & !4095;
-        while page < start.as_u64() + (len as u64) {
-            let va = unsafe { VirtAddr::new_unsafe(page) };
-            if pt.translate_addr(va).is_none() {
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        // TODO: free page table
+    }
+}
+
+fn unhandled_fault(trap: &mut TrapFrame, addr: VirtAddr) -> ! {
+    println!(
+        "Page fault at {:#x}, error code: {:#x}",
+        addr, trap.error_code
+    );
+    println!("RIP {:#x}, RSP {:#x}", trap.rip, trap.rsp);
+    loop {}
+}
+
+pub unsafe fn page_fault_handler(trap: &mut TrapFrame, addr: VirtAddr) {
+    if is_user_address(addr) {
+        if let Some(proc) = mach().current_proc() {
+            let mut memory = proc.memory.lock();
+            let found = 'found: {
+                for mapping in &memory.address_space.mappings {
+                    if addr >= mapping.addr && addr - mapping.addr < mapping.size as u64 {
+                        break 'found true;
+                    }
+                }
+                false
+            };
+            if found {
+                let frame = FrameAllocator.allocate_frame().unwrap();
+                let mut pt = memory.address_space.offset_page_table();
                 unsafe {
+                    zero_frame(frame.start_address());
                     pt.map_to(
-                        Page::from_start_address_unchecked(va),
-                        FrameAllocator.allocate_frame().unwrap(),
+                        Page::from_start_address_unchecked(addr.align_down(FRAME_SIZE as u64)),
+                        frame,
                         PageTableFlags::PRESENT
                             | PageTableFlags::WRITABLE
                             | PageTableFlags::USER_ACCESSIBLE,
@@ -73,36 +119,9 @@ impl AddressSpace {
                     .unwrap()
                     .flush()
                 };
+                return;
             }
-            page += 4096;
         }
     }
-
-    pub fn access_via_direct_map(&mut self, addr: VirtAddr) -> Option<&'static mut [u8]> {
-        assert!(addr.as_u64() >> 63 == 0);
-        unsafe {
-            let pt = self.offset_page_table();
-            let phys_addr = pt.translate_addr(addr)?;
-            Some(core::slice::from_raw_parts_mut(
-                phys_to_virt(phys_addr).as_mut_ptr(),
-                (4096 - (phys_addr.as_u64() & 4095)) as usize,
-            ))
-        }
-    }
-
-    pub fn activate(&mut self) {
-        unsafe {
-            let flags = Cr3::read().1;
-            Cr3::write(
-                PhysFrame::from_start_address_unchecked(virt_to_phys(self.page_table).unwrap()),
-                flags,
-            );
-        }
-    }
-}
-
-impl Drop for AddressSpace {
-    fn drop(&mut self) {
-        // TODO: free page table
-    }
+    unhandled_fault(trap, addr);
 }

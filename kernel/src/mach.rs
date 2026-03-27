@@ -1,4 +1,6 @@
-use spin::Mutex;
+use core::sync::atomic::{AtomicPtr, Ordering};
+
+use alloc::sync::Arc;
 use x86_64::{
     VirtAddr,
     instructions::tables::load_tss,
@@ -13,6 +15,11 @@ use x86_64::{
     },
 };
 
+use crate::{
+    sync::{BootInit, IrqLock},
+    user::Proc,
+};
+
 #[repr(C)]
 // in kernel mode this is accessible via GS: prefix
 // syscall_entry knows the layout of this struct!!
@@ -21,26 +28,21 @@ pub struct MachGsSpace {
     pub user_rsp: u64,
 }
 
-pub struct Mach {
+pub struct MachDescriptors {
     pub gdt: GlobalDescriptorTable,
     pub tss: TaskStateSegment,
     pub idt: InterruptDescriptorTable,
+}
+
+pub struct Mach {
+    pub descriptors: IrqLock<MachDescriptors>,
+    pub current_proc: AtomicPtr<Proc>,
     gs_space: *mut MachGsSpace, // because we allow magic access through GS cannot be a reference
 }
 
-impl Mach {
-    const fn new() -> Self {
-        Mach {
-            gdt: GlobalDescriptorTable::new(),
-            tss: TaskStateSegment::new(),
-            idt: InterruptDescriptorTable::new(),
-            gs_space: core::ptr::null_mut(),
-        }
-    }
-}
+static MACH0: BootInit<Mach> = unsafe { BootInit::uninit() };
 
 // instead of a spin::Mutex this should probably be something that disables interrupts and panics if locked or smth
-static mut MACH0: Mutex<Mach> = Mutex::new(Mach::new());
 static mut MACH_GS_SPACE: MachGsSpace = MachGsSpace {
     kernel_rsp: 0,
     user_rsp: 0,
@@ -53,16 +55,26 @@ pub const USER_CODE_SELECTOR: SegmentSelector = SegmentSelector(35);
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector(40);
 
 pub fn init() {
-    let mut guard = mach().lock();
-    let Mach {
+    let mach = unsafe {
+        MACH0.set(Mach {
+            descriptors: IrqLock::new(MachDescriptors {
+                gdt: GlobalDescriptorTable::new(),
+                tss: TaskStateSegment::new(),
+                idt: InterruptDescriptorTable::new(),
+            }),
+            current_proc: AtomicPtr::null(),
+            gs_space: &raw mut MACH_GS_SPACE,
+        })
+    };
+
+    let mut descriptor_guard = mach.descriptors.lock();
+    let MachDescriptors {
         ref mut gdt,
         ref mut tss,
         ref mut idt,
-        ref mut gs_space,
-    } = *guard;
+    } = *descriptor_guard;
 
-    *gs_space = &raw mut MACH_GS_SPACE;
-    GsBase::write(VirtAddr::from_ptr(&raw mut MACH_GS_SPACE));
+    GsBase::write(VirtAddr::from_ptr(mach.gs_space));
 
     assert_eq!(
         gdt.add_entry(Descriptor::kernel_code_segment()),
@@ -98,18 +110,22 @@ pub fn init() {
     }
 }
 
-pub fn mach() -> &'static Mutex<Mach> {
-    #[allow(static_mut_refs)]
-    unsafe {
-        &MACH0
-    }
+pub fn mach() -> &'static Mach {
+    MACH0.get()
 }
 
 impl Mach {
     pub fn gs_space(&self) -> &MachGsSpace {
         unsafe { self.gs_space.as_ref_unchecked() }
     }
-    pub fn gs_space_mut(&mut self) -> &mut MachGsSpace {
+    pub fn gs_space_mut(&self) -> &mut MachGsSpace {
         unsafe { self.gs_space.as_mut_unchecked() }
+    }
+    pub fn current_proc(&self) -> Option<Arc<Proc>> {
+        let ptr = self.current_proc.load(Ordering::Relaxed);
+        (!ptr.is_null()).then(|| unsafe {
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
+        })
     }
 }

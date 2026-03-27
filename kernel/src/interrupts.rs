@@ -2,10 +2,8 @@ use core::arch::naked_asm;
 
 use crate::{
     mach::{
-        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, Mach, USER_CODE_SELECTOR, USER_DATA_SELECTOR,
-        mach,
-    },
-    print, println,
+        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, MachDescriptors, USER_CODE_SELECTOR, USER_DATA_SELECTOR, mach
+    }, memory::page_fault_handler, print,
 };
 use pic8259::ChainedPics;
 use x86_64::{
@@ -36,29 +34,29 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 #[derive(Debug)]
 #[allow(dead_code)]
-struct TrapFrame {
-    rax: u64,
-    rbx: u64,
-    rcx: u64,
-    rdx: u64,
-    rsi: u64,
-    rdi: u64,
-    rbp: u64,
-    r8: u64,
-    r9: u64,
-    r10: u64,
-    r11: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    int_num: u64,
-    error_code: u64,
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-    rsp: u64,
-    ss: u64,
+pub struct TrapFrame {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub int_num: u64,
+    pub error_code: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 #[unsafe(naked)]
@@ -106,9 +104,7 @@ extern "C" fn int_common_entry() {
 extern "C" fn int_handler(trap: &mut TrapFrame) {
     match Interrupt::try_from(trap.int_num as u8).unwrap() {
         Interrupt::PageFault => {
-            println!("Page fault at {:#x}, error code: {:#x}", Cr2::read(), trap.error_code);
-            println!("RIP {:#x}, RSP {:#x}", trap.rip, trap.rsp);
-            loop {}
+            unsafe { page_fault_handler(trap, Cr2::read()) };
         },
         trap@_ => {
             panic!("Unhandled interrupt: {:#?}", trap);
@@ -184,8 +180,8 @@ fn to_addr(f: extern "C" fn()) -> VirtAddr {
 }
 
 pub fn init() {
-    let mut guard = mach().lock();
-    let Mach {
+    let mut guard = mach().descriptors.lock();
+    let MachDescriptors {
         ref mut idt,
         ref mut tss,
         ..

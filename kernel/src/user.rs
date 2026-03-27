@@ -1,79 +1,114 @@
-use core::arch::asm;
+use core::{arch::asm, marker::PhantomData, sync::atomic::Ordering};
 
-use x86_64::VirtAddr;
+use alloc::sync::Arc;
+use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::PhysFrame};
 use xmas_elf::{ElfFile, program::SegmentData};
 
-use crate::{mach::{USER_CODE_SELECTOR, mach}, memory::{AddressSpace, KERNEL_STACK_TOP}, println};
+use crate::{
+    mach::{USER_CODE_SELECTOR, mach},
+    memory::{AddressSpace, KERNEL_STACK_TOP},
+    println,
+    sync::{IrqLock, interrupt_guard},
+};
 
 pub const USER_STACK_BOTTOM: u64 = 0x0000_7FFF_0000_0000;
 pub const USER_STACK_SIZE: usize = 1048576;
 
+pub struct ProcMemory {
+    pub address_space: AddressSpace,
+}
+
 pub struct Proc {
-    address_space: AddressSpace,
-    rip: u64,
+    pub memory: IrqLock<ProcMemory>,
 }
 
 impl Proc {
     pub fn new() -> Option<Proc> {
         let address_space = AddressSpace::new()?;
         Some(Proc {
-            address_space,
-            rip: 0,
+            memory: IrqLock::new(ProcMemory { address_space }),
         })
     }
-    pub fn load_elf(&mut self, data: &[u8]) {
+    pub fn activate(self: Arc<Self>) -> ActiveProc {
+        let _interrupt_guard = interrupt_guard();
+        let mach = mach();
+        let old = mach
+            .current_proc
+            .swap(Arc::into_raw(self.clone()) as *mut Proc, Ordering::Relaxed);
+        if !old.is_null() {
+            unsafe { Arc::decrement_strong_count(old) };
+        }
+        unsafe {
+            let flags = Cr3::read().1;
+            let page_table = self.memory.lock().address_space.page_table_address();
+            Cr3::write(PhysFrame::from_start_address_unchecked(page_table), flags);
+        }
+        ActiveProc {
+            proc: self,
+            _phantom: PhantomData::default(),
+        }
+    }
+}
+
+pub struct ActiveProc {
+    proc: Arc<Proc>,
+    _phantom: PhantomData<*const ()>,
+}
+
+impl ActiveProc {
+    pub fn load_elf(&self, data: &[u8]) -> u64 {
+        let proc = &self.proc;
         let elf = ElfFile::new(data).unwrap();
         for h in elf.program_iter() {
             match h.get_type() {
                 Ok(xmas_elf::program::Type::Load) => {
                     let va = VirtAddr::new(h.virtual_addr());
-                    unsafe {
-                        self.address_space
-                            .ensure_allocated(va, h.mem_size() as usize)
-                    };
+                    proc.memory
+                        .lock()
+                        .address_space
+                        .add_mapping(va, h.mem_size() as usize);
                     let Ok(SegmentData::Undefined(data)) = h.get_data(&elf) else {
                         panic!("elf parsing error")
                     };
-                    let mut i = 0;
-                    while i < h.file_size() {
-                        let p =
-                            unsafe { self.address_space.access_via_direct_map(va + i).unwrap() };
-                        let n = p.len().min((h.file_size() - i) as usize);
-                        p[..n].copy_from_slice(&data[..n]);
-                        i += n as u64;
+                    unsafe {
+                        let dst = core::slice::from_raw_parts_mut(
+                            va.as_mut_ptr(),
+                            h.file_size() as usize,
+                        );
+                        dst.copy_from_slice(data);
                     }
                 }
                 Ok(_) => {}
                 Err(str) => panic!("load_elf: {str}"),
             }
         }
-        unsafe {
-            self.address_space
-                .ensure_allocated(VirtAddr::new_unsafe(USER_STACK_BOTTOM), USER_STACK_SIZE)
-        };
-        self.rip = elf.header.pt2.entry_point();
+        proc.memory
+            .lock()
+            .address_space
+            .add_mapping(VirtAddr::new(USER_STACK_BOTTOM), USER_STACK_SIZE);
+        elf.header.pt2.entry_point()
     }
-}
 
-pub unsafe fn go_to_userspace(proc: &'static mut Proc) -> ! {
-    println!("go to user!!");
-    unsafe {
-        proc.address_space.activate();
-        mach().lock().tss.privilege_stack_table[0] = KERNEL_STACK_TOP;
-        mach().lock().gs_space_mut().kernel_rsp = KERNEL_STACK_TOP.as_u64();
-        asm!(
-            "push {ds_sel}",     // SS
-            "push {stack}",      // RSP
-            "push 0x200",        // RFLAGS (interrupts enabled)
-            "push {cs_sel}",     // CS
-            "push {entry}",      // RIP
-            "swapgs",
-            "iretq",
-            ds_sel = in(reg) 0x1bu64,
-            cs_sel = in(reg) USER_CODE_SELECTOR.0 as u64,
-            stack = in(reg) USER_STACK_BOTTOM + USER_STACK_SIZE as u64,
-            entry = in(reg) proc.rip,
-            options(noreturn)
-        )
+    pub unsafe fn go_to_userspace(&self, entry_point: u64) -> ! {
+        println!("go to user!!");
+        unsafe {
+            let mach = mach();
+            mach.descriptors.lock().tss.privilege_stack_table[0] = KERNEL_STACK_TOP;
+            mach.gs_space_mut().kernel_rsp = KERNEL_STACK_TOP.as_u64();
+            asm!(
+                "push {ds_sel}",     // SS
+                "push {stack}",      // RSP
+                "push 0x200",        // RFLAGS (interrupts enabled)
+                "push {cs_sel}",     // CS
+                "push {entry}",      // RIP
+                "swapgs",
+                "iretq",
+                ds_sel = in(reg) 0x1bu64,
+                cs_sel = in(reg) USER_CODE_SELECTOR.0 as u64,
+                stack = in(reg) USER_STACK_BOTTOM + USER_STACK_SIZE as u64,
+                entry = in(reg) entry_point,
+                options(noreturn)
+            )
+        }
     }
 }

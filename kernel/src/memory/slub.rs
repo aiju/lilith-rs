@@ -9,7 +9,7 @@ use crate::{
     sync::IrqLock,
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct SlabCache {
     list: SlabList,
     object_size: usize,
@@ -17,7 +17,7 @@ struct SlabCache {
     max_free_count: u16,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub(super) struct SlabList {
     next: *mut SlabList,
     prev: *mut SlabList,
