@@ -5,7 +5,6 @@
 #![reexport_test_harness_main = "test_main"]
 #![feature(atomic_ptr_null)]
 
-mod debug_info;
 mod interrupts;
 mod mach;
 mod memory;
