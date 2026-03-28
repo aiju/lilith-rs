@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 use x86_64::{
@@ -36,6 +36,7 @@ pub struct MachDescriptors {
 
 pub struct Mach {
     pub descriptors: IrqLock<MachDescriptors>,
+    pub current_thread_id: AtomicUsize,
     pub current_proc: AtomicPtr<Proc>,
     gs_space: *mut MachGsSpace, // because we allow magic access through GS cannot be a reference
 }
@@ -54,7 +55,7 @@ pub const USER_DATA_SELECTOR: SegmentSelector = SegmentSelector(27);
 pub const USER_CODE_SELECTOR: SegmentSelector = SegmentSelector(35);
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector(40);
 
-pub fn init() {
+pub unsafe fn init() {
     let mach = unsafe {
         MACH0.set(Mach {
             descriptors: IrqLock::new(MachDescriptors {
@@ -63,6 +64,7 @@ pub fn init() {
                 idt: InterruptDescriptorTable::new(),
             }),
             current_proc: AtomicPtr::null(),
+            current_thread_id: AtomicUsize::new(0),
             gs_space: &raw mut MACH_GS_SPACE,
         })
     };

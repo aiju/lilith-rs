@@ -5,6 +5,7 @@ use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::PhysFrame};
 use xmas_elf::{ElfFile, program::SegmentData};
 
 use crate::{
+    interrupts::TrapFrame,
     mach::{USER_CODE_SELECTOR, mach},
     memory::{AddressSpace, KERNEL_STACK_TOP},
     println,
@@ -18,8 +19,15 @@ pub struct ProcMemory {
     pub address_space: AddressSpace,
 }
 
+pub enum ProcState {
+    Ready(TrapFrame),
+    Running,
+    Dead,
+}
+
 pub struct Proc {
     pub memory: IrqLock<ProcMemory>,
+    pub state: IrqLock<ProcState>,
 }
 
 impl Proc {
@@ -27,6 +35,7 @@ impl Proc {
         let address_space = AddressSpace::new()?;
         Some(Proc {
             memory: IrqLock::new(ProcMemory { address_space }),
+            state: IrqLock::new(ProcState::Dead),
         })
     }
     pub fn activate(self: Arc<Self>) -> ActiveProc {
@@ -47,6 +56,29 @@ impl Proc {
             proc: self,
             _phantom: PhantomData::default(),
         }
+    }
+}
+
+unsafe fn user_entry(frame: &TrapFrame) -> ! {
+    println!("go to user!!");
+    unsafe {
+        let mach = mach();
+        mach.descriptors.lock().tss.privilege_stack_table[0] = KERNEL_STACK_TOP;
+        mach.gs_space_mut().kernel_rsp = KERNEL_STACK_TOP.as_u64();
+        asm!(
+            "push {ds_sel}",     // SS
+            "push {stack}",      // RSP
+            "push 0x200",        // RFLAGS (interrupts enabled)
+            "push {cs_sel}",     // CS
+            "push {entry}",      // RIP
+            "swapgs",
+            "iretq",
+            ds_sel = in(reg) 0x1bu64,
+            cs_sel = in(reg) USER_CODE_SELECTOR.0 as u64,
+            stack = in(reg) USER_STACK_BOTTOM + USER_STACK_SIZE as u64,
+            entry = in(reg) frame.rip,
+            options(noreturn)
+        )
     }
 }
 
@@ -87,28 +119,5 @@ impl ActiveProc {
             .address_space
             .add_mapping(VirtAddr::new(USER_STACK_BOTTOM), USER_STACK_SIZE);
         elf.header.pt2.entry_point()
-    }
-
-    pub unsafe fn go_to_userspace(&self, entry_point: u64) -> ! {
-        println!("go to user!!");
-        unsafe {
-            let mach = mach();
-            mach.descriptors.lock().tss.privilege_stack_table[0] = KERNEL_STACK_TOP;
-            mach.gs_space_mut().kernel_rsp = KERNEL_STACK_TOP.as_u64();
-            asm!(
-                "push {ds_sel}",     // SS
-                "push {stack}",      // RSP
-                "push 0x200",        // RFLAGS (interrupts enabled)
-                "push {cs_sel}",     // CS
-                "push {entry}",      // RIP
-                "swapgs",
-                "iretq",
-                ds_sel = in(reg) 0x1bu64,
-                cs_sel = in(reg) USER_CODE_SELECTOR.0 as u64,
-                stack = in(reg) USER_STACK_BOTTOM + USER_STACK_SIZE as u64,
-                entry = in(reg) entry_point,
-                options(noreturn)
-            )
-        }
     }
 }

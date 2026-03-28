@@ -77,6 +77,9 @@ impl<T> IrqLock<T> {
             interrupt_guard,
         }
     }
+    pub unsafe fn force_unlock(&self) {
+        unsafe { self.inner.force_unlock() };
+    }
 }
 
 impl<T> core::ops::Deref for IrqLockGuard<'_, T> {

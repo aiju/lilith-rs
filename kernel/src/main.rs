@@ -16,6 +16,8 @@ mod sync;
 mod test;
 mod user;
 mod vga_buffer;
+mod id_vec;
+mod prelude;
 
 extern crate alloc;
 
@@ -25,7 +27,7 @@ use core::panic::PanicInfo;
 use alloc::sync::Arc;
 use bootloader::{BootInfo, entry_point};
 
-use crate::{ramfs::ram_fs, user::Proc};
+use crate::{ramfs::ram_fs, sched::{SCHEDULER, thread_yield}, user::Proc};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -37,12 +39,16 @@ fn panic(info: &PanicInfo) -> ! {
 #[allow(dead_code)]
 fn os_main() {
     println!("╔═══════════╗\n║ LILITH OS ║\n╚═══════════╝\nBooting...");
-
+/*
     let root_proc = Arc::new(Proc::new().unwrap());
     let active_proc = root_proc.activate();
     let data = ram_fs().get("cat").unwrap();
     let entry = active_proc.load_elf(data);
     unsafe { active_proc.go_to_userspace(entry) };
+*/
+
+    SCHEDULER.lock().spawn(|| println!("hello"));
+    SCHEDULER.lock().spawn(|| println!("world"));
 }
 
 entry_point!(main);
@@ -51,6 +57,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
         mach::init();
         interrupts::init();
         memory::init(boot_info);
+        sched::init();
         ramfs::init();
     }
 
@@ -58,5 +65,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
     test_main();
     #[cfg(not(test))]
     os_main();
-    loop {}
+
+    unsafe { sched::idle_thread() };
 }

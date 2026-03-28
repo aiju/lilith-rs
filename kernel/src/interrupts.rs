@@ -2,28 +2,31 @@ use core::arch::naked_asm;
 
 use crate::{
     mach::{
-        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, MachDescriptors, USER_CODE_SELECTOR, USER_DATA_SELECTOR, mach
-    }, memory::page_fault_handler, print,
+        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, MachDescriptors, USER_CODE_SELECTOR,
+        USER_DATA_SELECTOR, mach,
+    },
+    memory::page_fault_handler,
+    print,
+    sched::timer_interrupt,
+    sync::IrqLock,
 };
 use pic8259::ChainedPics;
 use x86_64::{
     VirtAddr,
+    instructions::port::Port,
     registers::{
         control::{Cr2, Efer, EferFlags},
         model_specific::{LStar, SFMask, Star},
         rflags::RFlags,
     },
-    structures::{
-        idt::InterruptDescriptorTable,
-        tss::TaskStateSegment,
-    },
+    structures::{idt::InterruptDescriptorTable, tss::TaskStateSegment},
 };
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: spin::Mutex<ChainedPics> =
-    spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+pub static PICS: IrqLock<ChainedPics> =
+    IrqLock::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 #[repr(align(16))]
 #[allow(dead_code)]
@@ -32,8 +35,9 @@ struct AlignedStack([u8; 4096]);
 static mut DOUBLE_FAULT_STACK: AlignedStack = AlignedStack([0; 4096]);
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[allow(dead_code)]
+#[repr(C)]
 pub struct TrapFrame {
     pub rax: u64,
     pub rbx: u64,
@@ -105,8 +109,9 @@ extern "C" fn int_handler(trap: &mut TrapFrame) {
     match Interrupt::try_from(trap.int_num as u8).unwrap() {
         Interrupt::PageFault => {
             unsafe { page_fault_handler(trap, Cr2::read()) };
-        },
-        trap@_ => {
+        }
+        Interrupt::Irq(0) => unsafe { timer_interrupt() },
+        trap @ _ => {
             panic!("Unhandled interrupt: {:#?}", trap);
         }
     }
@@ -116,7 +121,6 @@ fn set_ist_stack<T>(tss: &mut TaskStateSegment, index: u16, stack: *mut T) {
     tss.interrupt_stack_table[index as usize] =
         VirtAddr::from_ptr(stack) + core::mem::size_of::<T>();
 }
-
 
 extern "C" fn syscall_handler(trap: &mut TrapFrame) {
     print!("{}", trap.rdi as u8 as char);
@@ -179,7 +183,23 @@ fn to_addr(f: extern "C" fn()) -> VirtAddr {
     VirtAddr::from_ptr(f as *const ())
 }
 
-pub fn init() {
+const PIT_FREQUENCY: u32 = 1_193_182;
+const DESIRED_HZ: u32 = 100;
+const DIVISOR: u16 = (PIT_FREQUENCY / DESIRED_HZ) as u16;
+
+unsafe fn init_pit() {
+    unsafe {
+        let mut cmd: Port<u8> = Port::new(0x43);
+        let mut data: Port<u8> = Port::new(0x40);
+
+        // channel 0, lobyte/hibyte, rate generator mode
+        cmd.write(0x36);
+        data.write((DIVISOR & 0xFF) as u8); // low byte
+        data.write(((DIVISOR >> 8) & 0xFF) as u8); // high byte
+    }
+}
+
+pub unsafe fn init() {
     let mut guard = mach().descriptors.lock();
     let MachDescriptors {
         ref mut idt,
@@ -190,8 +210,12 @@ pub fn init() {
     set_ist_stack(tss, DOUBLE_FAULT_IST_INDEX, &raw mut DOUBLE_FAULT_STACK);
     fill_idt(idt);
 
-    unsafe { PICS.lock().initialize() };
-    unsafe { PICS.lock().disable() };
+    unsafe {
+        let mut pics = PICS.lock();
+        pics.initialize();
+        pics.write_masks(0xfe, 0xff);
+        init_pit();
+    }
 
     Star::write(
         USER_CODE_SELECTOR,
@@ -204,7 +228,6 @@ pub fn init() {
     SFMask::write(RFlags::INTERRUPT_FLAG);
     unsafe { Efer::update(|f| *f |= EferFlags::SYSTEM_CALL_EXTENSIONS) };
 }
-
 
 macro_rules! int_entry {
     ($sym:ident, $num:expr, false) => {

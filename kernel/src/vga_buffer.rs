@@ -1,10 +1,9 @@
 use core::fmt;
 use lazy_static::lazy_static;
-use spin::Mutex;
 use volatile::Volatile;
 use x86_64::PhysAddr;
 
-use crate::memory::phys_to_mut;
+use crate::{memory::phys_to_mut, sync::IrqLock};
 
 /// Unicode codepoints in ascending order (for binary search lookup).
 const UNICODE_TO_CP437_KEYS: [u16; 128] = [
@@ -157,7 +156,7 @@ impl fmt::Write for Writer {
 }
 
 lazy_static! {
-    pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
+    pub static ref WRITER: IrqLock<Writer> = IrqLock::new(Writer {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe { phys_to_mut(PhysAddr::new(0xb8000)) },
