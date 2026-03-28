@@ -10,6 +10,7 @@ mod mach;
 mod memory;
 mod ramfs;
 mod sched;
+mod tasks;
 mod serial;
 mod sync;
 #[cfg(test)]
@@ -27,7 +28,7 @@ use core::panic::PanicInfo;
 use alloc::sync::Arc;
 use bootloader::{BootInfo, entry_point};
 
-use crate::{ramfs::ram_fs, sched::{SCHEDULER, thread_yield}, user::Proc};
+use crate::{ramfs::ram_fs, sched::{SCHEDULER, thread_yield}, tasks::task_spawn, user::Proc};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -47,8 +48,7 @@ fn os_main() {
     unsafe { active_proc.go_to_userspace(entry) };
 */
 
-    SCHEDULER.lock().spawn(|| println!("hello"));
-    SCHEDULER.lock().spawn(|| println!("world"));
+    task_spawn(async { println!("hello, world") });
 }
 
 entry_point!(main);
@@ -58,6 +58,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
         interrupts::init();
         memory::init(boot_info);
         sched::init();
+        tasks::init();
         ramfs::init();
     }
 

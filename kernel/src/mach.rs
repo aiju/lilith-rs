@@ -16,8 +16,7 @@ use x86_64::{
 };
 
 use crate::{
-    sync::{BootInit, IrqLock},
-    user::Proc,
+    sched::ThreadId, sync::{BootInit, IrqLock}, user::Proc
 };
 
 #[repr(C)]
@@ -129,5 +128,8 @@ impl Mach {
             Arc::increment_strong_count(ptr);
             Arc::from_raw(ptr)
         })
+    }
+    pub fn current_thread_id(&self) -> ThreadId {
+        ThreadId::from(self.current_thread_id.load(Ordering::Relaxed))
     }
 }

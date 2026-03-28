@@ -11,10 +11,10 @@ mod debug_info;
 pub use address_space::AddressSpace;
 pub use address_space::page_fault_handler;
 pub use bootstrap::init;
+pub use frame_info::{FRAME_SHIFT, FRAME_SIZE};
 
 use crate::memory::{
     buddy::{BUDDY_ALLOCATOR, BUDDY_MAX},
-    frame_info::{FRAME_SHIFT, FRAME_SIZE},
     slub::{SLUB_ALLOCATOR, SLUB_MAX},
 };
 
