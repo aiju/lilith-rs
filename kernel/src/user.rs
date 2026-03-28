@@ -5,11 +5,7 @@ use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::PhysFrame};
 use xmas_elf::{ElfFile, program::SegmentData};
 
 use crate::{
-    interrupts::TrapFrame,
-    mach::{USER_CODE_SELECTOR, mach},
-    memory::{AddressSpace, KERNEL_STACK_TOP},
-    println,
-    sync::{IrqLock, interrupt_guard},
+    mach::{USER_CODE_SELECTOR, mach}, memory::AddressSpace, println, sched::thread_stack, sync::{IrqLock, interrupt_guard}
 };
 
 pub const USER_STACK_BOTTOM: u64 = 0x0000_7FFF_0000_0000;
@@ -19,15 +15,8 @@ pub struct ProcMemory {
     pub address_space: AddressSpace,
 }
 
-pub enum ProcState {
-    Ready(TrapFrame),
-    Running,
-    Dead,
-}
-
 pub struct Proc {
     pub memory: IrqLock<ProcMemory>,
-    pub state: IrqLock<ProcState>,
 }
 
 impl Proc {
@@ -35,7 +24,6 @@ impl Proc {
         let address_space = AddressSpace::new()?;
         Some(Proc {
             memory: IrqLock::new(ProcMemory { address_space }),
-            state: IrqLock::new(ProcState::Dead),
         })
     }
     pub fn activate(self: Arc<Self>) -> ActiveProc {
@@ -48,37 +36,16 @@ impl Proc {
             unsafe { Arc::decrement_strong_count(old) };
         }
         unsafe {
-            let flags = Cr3::read().1;
+            let (old_page_table, flags) = Cr3::read();
             let page_table = self.memory.lock().address_space.page_table_address();
-            Cr3::write(PhysFrame::from_start_address_unchecked(page_table), flags);
+            if old_page_table.start_address() != page_table {
+                Cr3::write(PhysFrame::from_start_address_unchecked(page_table), flags);
+            }
         }
         ActiveProc {
             proc: self,
             _phantom: PhantomData::default(),
         }
-    }
-}
-
-unsafe fn user_entry(frame: &TrapFrame) -> ! {
-    println!("go to user!!");
-    unsafe {
-        let mach = mach();
-        mach.descriptors.lock().tss.privilege_stack_table[0] = KERNEL_STACK_TOP;
-        mach.gs_space_mut().kernel_rsp = KERNEL_STACK_TOP.as_u64();
-        asm!(
-            "push {ds_sel}",     // SS
-            "push {stack}",      // RSP
-            "push 0x200",        // RFLAGS (interrupts enabled)
-            "push {cs_sel}",     // CS
-            "push {entry}",      // RIP
-            "swapgs",
-            "iretq",
-            ds_sel = in(reg) 0x1bu64,
-            cs_sel = in(reg) USER_CODE_SELECTOR.0 as u64,
-            stack = in(reg) USER_STACK_BOTTOM + USER_STACK_SIZE as u64,
-            entry = in(reg) frame.rip,
-            options(noreturn)
-        )
     }
 }
 
@@ -119,5 +86,30 @@ impl ActiveProc {
             .address_space
             .add_mapping(VirtAddr::new(USER_STACK_BOTTOM), USER_STACK_SIZE);
         elf.header.pt2.entry_point()
+    }
+
+    pub unsafe fn run(&self, entry: u64) -> ! {
+        println!("go to user!!");
+        unsafe {
+            x86_64::instructions::interrupts::disable();
+            let (_, stack_top) = thread_stack();
+            let mach = mach();
+            mach.descriptors.lock().tss.privilege_stack_table[0] = stack_top;
+            mach.gs_space_mut().kernel_rsp = stack_top.as_u64();
+            asm!(
+                "push {ds_sel}",     // SS
+                "push {stack}",      // RSP
+                "push 0x200",        // RFLAGS (interrupts enabled)
+                "push {cs_sel}",     // CS
+                "push {entry}",      // RIP
+                "swapgs",
+                "iretq",
+                ds_sel = in(reg) 0x1bu64,
+                cs_sel = in(reg) USER_CODE_SELECTOR.0 as u64,
+                stack = in(reg) USER_STACK_BOTTOM + USER_STACK_SIZE as u64,
+                entry = in(reg) entry,
+                options(noreturn)
+            )
+        }
     }
 }

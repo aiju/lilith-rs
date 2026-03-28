@@ -186,6 +186,7 @@ fn to_addr(f: extern "C" fn()) -> VirtAddr {
 const PIT_FREQUENCY: u32 = 1_193_182;
 const DESIRED_HZ: u32 = 100;
 const DIVISOR: u16 = (PIT_FREQUENCY / DESIRED_HZ) as u16;
+pub const TICK_NS: u64 = 1_000_000_000 * DIVISOR as u64 / PIT_FREQUENCY as u64;
 
 unsafe fn init_pit() {
     unsafe {

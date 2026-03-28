@@ -5,20 +5,20 @@
 #![reexport_test_harness_main = "test_main"]
 #![feature(atomic_ptr_null)]
 
+mod id_vec;
 mod interrupts;
 mod mach;
 mod memory;
+mod prelude;
 mod ramfs;
 mod sched;
-mod tasks;
 mod serial;
 mod sync;
+mod tasks;
 #[cfg(test)]
 mod test;
 mod user;
 mod vga_buffer;
-mod id_vec;
-mod prelude;
 
 extern crate alloc;
 
@@ -28,7 +28,12 @@ use core::panic::PanicInfo;
 use alloc::sync::Arc;
 use bootloader::{BootInfo, entry_point};
 
-use crate::{ramfs::ram_fs, sched::{SCHEDULER, thread_yield}, tasks::task_spawn, user::Proc};
+use crate::{
+    ramfs::ram_fs,
+    sched::{thread_sleep, thread_spawn},
+    tasks::{task_sleep, task_spawn},
+    user::Proc,
+};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -40,15 +45,21 @@ fn panic(info: &PanicInfo) -> ! {
 #[allow(dead_code)]
 fn os_main() {
     println!("╔═══════════╗\n║ LILITH OS ║\n╚═══════════╝\nBooting...");
-/*
-    let root_proc = Arc::new(Proc::new().unwrap());
-    let active_proc = root_proc.activate();
-    let data = ram_fs().get("cat").unwrap();
-    let entry = active_proc.load_elf(data);
-    unsafe { active_proc.go_to_userspace(entry) };
-*/
 
-    task_spawn(async { println!("hello, world") });
+    task_spawn(async {
+        loop {
+            println!(":)");
+            task_sleep(1_000_000_000).await;
+        }
+    });
+
+    thread_spawn(|| {
+        let root_proc = Arc::new(Proc::new().unwrap());
+        let active_proc = root_proc.activate();
+        let data = ram_fs().get("cat").unwrap();
+        let entry = active_proc.load_elf(data);
+        unsafe { active_proc.run(entry) };
+    });
 }
 
 entry_point!(main);

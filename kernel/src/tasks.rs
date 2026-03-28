@@ -7,10 +7,7 @@ use core::{
 use alloc::{boxed::Box, collections::VecDeque};
 
 use crate::{
-    define_id,
-    id_vec::IdSparseVec,
-    sched::{WaitQueue, thread_spawn},
-    sync::IrqLock,
+    define_id, id_vec::IdSparseVec, mach::mach, sched::{WaitQueue, run_later, thread_spawn}, sync::IrqLock
 };
 
 define_id!(TaskId);
@@ -63,18 +60,21 @@ impl Executor {
         EXECUTOR_WAIT.wake_one();
     }
     fn wake(&mut self, id: TaskId) {
-        let task = self.tasks.get_mut(id).unwrap();
+        let Some(task) = self.tasks.get_mut(id) else {
+            // spurious wake -- ignore
+            return;
+        };
         match core::mem::replace(&mut task.state, TaskState::ExecutingAndAwoken) {
             TaskState::Executing | TaskState::ExecutingAndAwoken => {}
             TaskState::Paused(future) => {
                 task.state = TaskState::Ready(future);
                 self.ready.push_back(id);
+                EXECUTOR_WAIT.wake_one();
             }
             TaskState::Ready(future) => {
                 task.state = TaskState::Ready(future);
             }
         }
-        EXECUTOR_WAIT.wake_one();
     }
 }
 
@@ -99,7 +99,9 @@ fn executor_thread() {
             panic!("task in ready list not actually ready");
         };
         drop(executor);
-        let result = future.as_mut().poll(&mut core::task::Context::from_waker(&mk_waker(id)));
+        let result = future
+            .as_mut()
+            .poll(&mut core::task::Context::from_waker(&mk_waker(id)));
         let mut executor = EXECUTOR.lock();
         match result {
             Poll::Ready(()) => {
@@ -150,3 +152,36 @@ pub fn task_spawn(body: impl Future<Output = ()> + Send + 'static) {
 pub async fn task_yield() {
     YieldFuture::NotYielded.await
 }
+
+// TODO: need to be able to cancel sleeps
+enum SleepFuture {
+    NotYet(u64),
+    Yet(u64),
+}
+
+impl Future for SleepFuture {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
+        match *self {
+            SleepFuture::NotYet(delay_ns) => {
+                let waker = cx.waker().clone();
+                let target_ticks = run_later(delay_ns, move || waker.wake());
+                *self = SleepFuture::Yet(target_ticks);
+                Poll::Pending
+            }
+            SleepFuture::Yet(target_ticks) => {
+                if mach().ticks() >= target_ticks {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+pub async fn task_sleep(delay_ns: u64) {
+    SleepFuture::NotYet(delay_ns).await
+}
+

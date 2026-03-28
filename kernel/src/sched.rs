@@ -3,16 +3,17 @@ use crate::prelude::*;
 
 use core::{alloc::Layout, arch::naked_asm, sync::atomic::Ordering};
 
-use alloc::collections::VecDeque;
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use x86_64::VirtAddr;
 
 use crate::{
     define_id,
     id_vec::IdSparseVec,
-    interrupts::{PICS, TrapFrame},
+    interrupts::{PICS, TICK_NS, TrapFrame},
     mach::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, mach},
     memory::{FRAME_SIZE, KERNEL_STACK_SIZE, KERNEL_STACK_TOP, kernel_alloc, kernel_free},
-    sync::{IrqLock, IrqLockGuard},
+    sync::{IrqLock, IrqLockGuard, interrupt_guard},
+    user::Proc,
 };
 
 define_id!(ThreadId);
@@ -25,12 +26,14 @@ pub enum ThreadState {
     Ready,
     Exiting,
     Waiting,
+    Sleeping,
 }
 
 pub struct SchedThread {
     stack: VirtAddr,
     stack_size: usize,
     regs: TrapFrame,
+    proc: Option<Arc<Proc>>,
     state: ThreadState,
 }
 
@@ -49,6 +52,12 @@ impl Scheduler {
             threads: IdSparseVec::new(),
             ready: VecDeque::new(),
         }
+    }
+    pub fn current_thread(&self) -> &SchedThread {
+        self.threads.get(mach().current_thread_id()).unwrap()
+    }
+    pub fn current_thread_mut(&mut self) -> &mut SchedThread {
+        self.threads.get_mut(mach().current_thread_id()).unwrap()
     }
     fn spawn_inner(&mut self, fun: fn(*const ()), data: *const (), size: usize, align: usize) {
         let stack_size = 16384;
@@ -70,6 +79,7 @@ impl Scheduler {
             stack,
             stack_size,
             regs,
+            proc: None,
             state: ThreadState::Ready,
         });
         self.ready.push_back(id);
@@ -98,7 +108,7 @@ impl Scheduler {
     }
     fn wake(&mut self, id: ThreadId) {
         let thread = self.threads.get_mut(id).unwrap();
-        assert_eq!(thread.state, ThreadState::Waiting);
+        assert!(thread.state == ThreadState::Waiting || thread.state == ThreadState::Sleeping);
         thread.state = ThreadState::Ready;
         self.ready.push_back(id);
     }
@@ -161,6 +171,7 @@ enum SchedReason {
     Yielding,
     Exiting,
     Waiting,
+    Sleeping,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -204,10 +215,17 @@ fn sched(mut scheduler_guard: IrqLockGuard<Scheduler>, reason: SchedReason) -> b
             current_thread.state = ThreadState::Waiting;
             DeferredAction::None
         }
+        SchedReason::Sleeping => {
+            current_thread.state = ThreadState::Sleeping;
+            DeferredAction::None
+        }
     };
 
     next_thread.state = ThreadState::Running;
     mach().current_thread_id.store(next_id.0, Ordering::Relaxed);
+
+    current_thread.proc = mach().current_proc();
+    next_thread.proc.as_ref().map(|x| x.clone().activate());
 
     let deferred_action = unsafe {
         *switch(
@@ -251,6 +269,7 @@ pub unsafe fn init() {
     let id = SCHEDULER.lock().threads.insert(SchedThread {
         stack: KERNEL_STACK_TOP - KERNEL_STACK_SIZE,
         stack_size: KERNEL_STACK_SIZE,
+        proc: None,
         regs: TrapFrame {
             cs: KERNEL_CODE_SELECTOR.0 as u64,
             ss: KERNEL_DATA_SELECTOR.0 as u64,
@@ -261,7 +280,81 @@ pub unsafe fn init() {
     assert_eq!(id, IDLE_THREAD_ID);
 }
 
+type TimerClosure = Box<dyn FnOnce() + Send + 'static>;
+
+struct TimerEvent {
+    delta: u64,
+    closure: TimerClosure,
+}
+
+pub struct TimerQueue {
+    timers: VecDeque<TimerEvent>,
+}
+
+static TIMER_QUEUE: IrqLock<TimerQueue> = IrqLock::new(TimerQueue::new());
+
+impl TimerQueue {
+    pub const fn new() -> TimerQueue {
+        TimerQueue {
+            timers: VecDeque::new(),
+        }
+    }
+    pub fn insert(&mut self, mut ticks: u64, closure: TimerClosure) {
+        for (i, t) in self.timers.iter_mut().enumerate() {
+            if ticks < t.delta {
+                t.delta -= ticks;
+                self.timers.insert(
+                    i,
+                    TimerEvent {
+                        delta: ticks,
+                        closure,
+                    },
+                );
+                return;
+            } else {
+                ticks -= t.delta;
+            }
+        }
+        self.timers.push_back(TimerEvent {
+            delta: ticks,
+            closure,
+        });
+    }
+    fn tick(&mut self) {
+        if !self.timers.is_empty() {
+            if self.timers[0].delta > 0 {
+                self.timers[0].delta -= 1;
+            }
+        }
+    }
+    fn pop_closure(&mut self) -> Option<TimerClosure> {
+        self.timers
+            .pop_front_if(|t| t.delta == 0)
+            .map(|t| t.closure)
+    }
+}
+
+pub fn run_later(delay_ns: u64, closure: impl FnOnce() + Send + 'static) -> u64 {
+    let ticks = delay_ns.div_ceil(TICK_NS);
+    let mut timer_queue = TIMER_QUEUE.lock();
+    let target_ticks = mach().ticks() + ticks;
+    timer_queue.insert(ticks, Box::new(closure));
+    target_ticks
+}
+
+pub fn thread_sleep(delay_ns: u64) {
+    let scheduler = SCHEDULER.lock();
+    let id = mach().current_thread_id();
+    run_later(delay_ns, move || SCHEDULER.lock().wake(id));
+    sched(scheduler, SchedReason::Sleeping);
+}
+
 pub unsafe fn timer_interrupt() {
+    mach().ticks.fetch_add(1, Ordering::Relaxed);
+    TIMER_QUEUE.lock().tick();
+    while let Some(closure) = TIMER_QUEUE.lock().pop_closure() {
+        closure();
+    }
     unsafe { PICS.lock().notify_end_of_interrupt(32) };
     thread_yield();
 }
@@ -303,4 +396,10 @@ impl WaitQueue {
             .drain(..)
             .for_each(|id| scheduler.wake(id));
     }
+}
+
+pub fn thread_stack() -> (VirtAddr, VirtAddr) {
+    let scheduler = SCHEDULER.lock();
+    let thread = scheduler.threads.get(mach().current_thread_id()).unwrap();
+    (thread.stack, thread.stack + thread.stack_size)
 }

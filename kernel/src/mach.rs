@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 use x86_64::{
@@ -37,6 +37,7 @@ pub struct Mach {
     pub descriptors: IrqLock<MachDescriptors>,
     pub current_thread_id: AtomicUsize,
     pub current_proc: AtomicPtr<Proc>,
+    pub ticks: AtomicU64,
     gs_space: *mut MachGsSpace, // because we allow magic access through GS cannot be a reference
 }
 
@@ -64,6 +65,7 @@ pub unsafe fn init() {
             }),
             current_proc: AtomicPtr::null(),
             current_thread_id: AtomicUsize::new(0),
+            ticks: AtomicU64::new(0),
             gs_space: &raw mut MACH_GS_SPACE,
         })
     };
@@ -131,5 +133,8 @@ impl Mach {
     }
     pub fn current_thread_id(&self) -> ThreadId {
         ThreadId::from(self.current_thread_id.load(Ordering::Relaxed))
+    }
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
     }
 }
