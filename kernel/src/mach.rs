@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::sync::Arc;
 use x86_64::{
@@ -16,7 +16,7 @@ use x86_64::{
 };
 
 use crate::{
-    sched::ThreadId, sync::{BootInit, IrqLock}, user::Proc
+    sched::ThreadId, sync::{BootInit, InterruptGuard, IrqLock, interrupt_guard}, user::Proc
 };
 
 #[repr(C)]
@@ -37,6 +37,23 @@ pub struct Mach {
     pub descriptors: IrqLock<MachDescriptors>,
     pub current_thread_id: AtomicUsize,
     pub current_proc: AtomicPtr<Proc>,
+
+    /// this counter counts how many reasons there are for interrupts to be disabled (mostly IrqLocks that are held)
+    /// 
+    /// important invariants:
+    /// 1. interrupt flag is set iff irq_lock_count != 0
+    /// 2. irq_lock_count == 1 when calling sched() (only the scheduler lock is held)
+    /// 
+    /// corolloraries:
+    /// 1. the interrupt common routine has to increment/decrement the count
+    /// 2. 'blocking' interrupt handlers may call sched but have to accept interrupts being re-enabled
+    /// 3. 'non-blocking' interrupt handlers have to rely on irq_need_resched to call sched for them (which fiddles with the count)
+    pub irq_lock_count: AtomicUsize,
+
+    /// interrupt handlers can set this flag to mark that rescheduling is needed when falling out of the interrupt handler
+    /// 
+    /// the flag is only acted upon when irq_lock_count == 1 at the end of the handler
+    pub irq_need_resched: AtomicBool,
     pub ticks: AtomicU64,
     gs_space: *mut MachGsSpace, // because we allow magic access through GS cannot be a reference
 }
@@ -55,7 +72,7 @@ pub const USER_DATA_SELECTOR: SegmentSelector = SegmentSelector(27);
 pub const USER_CODE_SELECTOR: SegmentSelector = SegmentSelector(35);
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector(40);
 
-pub unsafe fn init() {
+pub unsafe fn init() -> InterruptGuard {
     let mach = unsafe {
         MACH0.set(Mach {
             descriptors: IrqLock::new(MachDescriptors {
@@ -66,9 +83,12 @@ pub unsafe fn init() {
             current_proc: AtomicPtr::null(),
             current_thread_id: AtomicUsize::new(0),
             ticks: AtomicU64::new(0),
+            irq_lock_count: AtomicUsize::new(0),
+            irq_need_resched: AtomicBool::new(false),
             gs_space: &raw mut MACH_GS_SPACE,
         })
     };
+    let interrupt_guard = interrupt_guard();
 
     let mut descriptor_guard = mach.descriptors.lock();
     let MachDescriptors {
@@ -111,6 +131,7 @@ pub unsafe fn init() {
         load_tss(TSS_SELECTOR);
         idt.load_unsafe();
     }
+    interrupt_guard
 }
 
 pub fn mach() -> &'static Mach {

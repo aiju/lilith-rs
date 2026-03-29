@@ -10,9 +10,11 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 extern "C" fn _start() {
-    let s = "hello, world";
-    for c in s.as_bytes() {
-        unsafe { asm!("mov rdi, {c}", "syscall", c = in(reg) *c as u64) }
+    let s = "hello, world\n";
+    loop {
+        for c in s.as_bytes() {
+            unsafe { asm!("mov rdi, 0", "mov rsi, {c}", "syscall", c = in(reg) *c as u64) }
+        }
+        unsafe { asm!("mov rdi, 1", "syscall") }
     }
-    loop {}
 }

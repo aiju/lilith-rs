@@ -3,18 +3,28 @@ use crate::prelude::*;
 
 use core::{alloc::Layout, arch::naked_asm, sync::atomic::Ordering};
 
-use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use x86_64::VirtAddr;
 
 use crate::{
     define_id,
     id_vec::IdSparseVec,
-    interrupts::{PICS, TICK_NS, TrapFrame},
-    mach::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, mach},
+    interrupts::{IrqContext, PICS, TICK_NS},
+    mach::mach,
     memory::{FRAME_SIZE, KERNEL_STACK_SIZE, KERNEL_STACK_TOP, kernel_alloc, kernel_free},
-    sync::{IrqLock, IrqLockGuard, interrupt_guard},
+    sync::{IrqLock, IrqLockGuard},
     user::Proc,
 };
+
+// used in sched() to block access of stale references
+macro_rules! yeet_references {
+    ($($ref:expr),+ $(,)?) => {
+        #[allow(forgetting_references)]
+        {
+            $(core::mem::forget($ref);)+
+        }
+    };
+}
 
 define_id!(ThreadId);
 
@@ -29,10 +39,24 @@ pub enum ThreadState {
     Sleeping,
 }
 
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+#[repr(C)]
+struct SwitchFrame {
+    rbx: u64,
+    rbp: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rip: u64,
+    rsp: u64,
+}
+
 pub struct SchedThread {
     stack: VirtAddr,
     stack_size: usize,
-    regs: TrapFrame,
+    regs: SwitchFrame,
     proc: Option<Arc<Proc>>,
     state: ThreadState,
 }
@@ -66,14 +90,11 @@ impl Scheduler {
         rsp = rsp.align_down(16u64); // SysV ABI requires 16-byte stack alignment
         assert!(rsp >= stack + MIN_STACK);
         unsafe { core::ptr::copy_nonoverlapping(data as *const u8, rsp.as_mut_ptr(), size) };
-        let regs = TrapFrame {
+        let regs = SwitchFrame {
             rip: thread_entry_stub as *const () as u64,
             rbx: fun as *const () as u64,
             rsp: rsp.as_u64(),
-            rflags: 0x2,
-            cs: KERNEL_CODE_SELECTOR.0 as u64,
-            ss: KERNEL_DATA_SELECTOR.0 as u64,
-            ..TrapFrame::default()
+            ..SwitchFrame::default()
         };
         let id = self.threads.insert(SchedThread {
             stack,
@@ -120,54 +141,58 @@ extern "C" fn thread_entry_stub() {
         "mov rdi, rbx",
         "mov rsi, rsp",
         "call {thread_entry}",
-        // never returns
+        // call not jmp to make the stack look normal, esp wrt alignment, never actually returns
         thread_entry = sym thread_entry,
     )
 }
 
 #[allow(improper_ctypes_definitions)]
 extern "C" fn thread_entry(f: fn(*const ()), aux: *const ()) -> ! {
+    // we enter this after the switch() in sched() which means we're holding the scheduler lock
+    // but since the actual lock guard isn't transferred across we have to force_unlock
     unsafe { SCHEDULER.force_unlock() };
-    x86_64::instructions::interrupts::enable();
+
     f(aux);
     thread_exit();
 }
 
 #[unsafe(naked)]
 unsafe extern "C" fn switch(
-    current: *mut TrapFrame,
-    next: *const TrapFrame,
+    current: *mut SwitchFrame,
+    next: *const SwitchFrame,
     value: *const DeferredAction,
 ) -> *const DeferredAction {
     naked_asm!(
+        // move deferred action pointer into the return value
         "mov rax, rdx",
-        "mov [rdi+8*1], rbx",
-        "mov [rdi+8*6], rbp",
-        "mov [rdi+8*11], r12",
-        "mov [rdi+8*12], r13",
-        "mov [rdi+8*13], r14",
-        "mov [rdi+8*14], r15",
-        "pop [rdi+8*17]",
-        "mov [rdi+8*20], rsp",
-        "pushf",
-        "pop [rdi+8*19]",
-        "mov rbx, [rsi+8*1]",
-        "mov rbp, [rsi+8*6]",
-        "mov r12, [rsi+8*11]",
-        "mov r13, [rsi+8*12]",
-        "mov r14, [rsi+8*13]",
-        "mov r15, [rsi+8*14]",
-        "push [rsi+8*21]",
-        "push [rsi+8*20]",
-        "push [rsi+8*19]",
-        "push [rsi+8*18]",
-        "push [rsi+8*17]",
-        "iretq"
+        // save callee-save registers
+        "mov [rdi+8*0], rbx",
+        "mov [rdi+8*1], rbp",
+        "mov [rdi+8*2], r12",
+        "mov [rdi+8*3], r13",
+        "mov [rdi+8*4], r14",
+        "mov [rdi+8*5], r15",
+        // pop return address into rip field
+        "pop [rdi+8*6]",
+        // save RSP, leave stack alone after this
+        "mov [rdi+8*7], rsp",
+        // load callee-save registers
+        "mov rbx, [rsi+8*0]",
+        "mov rbp, [rsi+8*1]",
+        "mov r12, [rsi+8*2]",
+        "mov r13, [rsi+8*3]",
+        "mov r14, [rsi+8*4]",
+        "mov r15, [rsi+8*5]",
+        // load RSP
+        "mov rsp, [rsi+8*7]",
+        // push new return address and RET
+        "push [rsi+8*6]",
+        "ret",
     )
 }
 
 #[derive(PartialEq, Eq, Debug)]
-enum SchedReason {
+pub enum SchedReason {
     Yielding,
     Exiting,
     Waiting,
@@ -180,68 +205,101 @@ enum DeferredAction {
     Cleanup(ThreadId),
 }
 
-fn sched(mut scheduler_guard: IrqLockGuard<Scheduler>, reason: SchedReason) -> bool {
-    let Scheduler { threads, ready, .. } = &mut *scheduler_guard;
-    let current_id = mach().current_thread_id();
+pub fn sched(
+    mut scheduler_guard: IrqLockGuard<Scheduler>,
+    reason: SchedReason,
+) -> IrqLockGuard<Scheduler> {
+    // we might need to loop around if we hit a deferred action
+    loop {
+        assert_eq!(
+            mach().irq_lock_count.load(Ordering::Relaxed),
+            1,
+            "sched() called in invalid context (locks held or non-blocking interrupt context). irq_lock_count == {}",
+            mach().irq_lock_count.load(Ordering::Relaxed)
+        );
 
-    if reason == SchedReason::Yielding && ready.is_empty() {
-        return false;
-    }
-    let next_id = if reason == SchedReason::Exiting {
-        IDLE_THREAD_ID
-    } else {
-        ready.pop_front().unwrap_or(IDLE_THREAD_ID)
-    };
-    println!("switching from {:?} to {:?}", current_id, next_id);
-    assert_ne!(current_id, next_id);
+        let Scheduler { threads, ready, .. } = &mut *scheduler_guard;
+        let current_id = mach().current_thread_id();
 
-    let (current_thread, next_thread) = threads.get_mut_2(current_id, next_id).unwrap();
-    assert_eq!(current_thread.state, ThreadState::Running);
+        if reason == SchedReason::Yielding && ready.is_empty() {
+            return scheduler_guard;
+        }
+        let next_id = if reason == SchedReason::Exiting {
+            IDLE_THREAD_ID
+        } else {
+            ready.pop_front().unwrap_or(IDLE_THREAD_ID)
+        };
+        println!("switching from {:?} to {:?}", current_id, next_id);
+        assert_ne!(current_id, next_id);
 
-    let deferred_action = match reason {
-        SchedReason::Yielding => {
-            current_thread.state = ThreadState::Ready;
-            if current_id != IDLE_THREAD_ID {
-                ready.push_back(current_id);
+        let (current_thread, next_thread) = threads.get_mut_2(current_id, next_id).unwrap();
+        assert_eq!(current_thread.state, ThreadState::Running);
+
+        // important invariant: we only ever pass DeferredActions to the idle thread
+        // this is because other threads might be new and thread_entry() doesn't handle DeferredActions
+
+        let deferred_action = match reason {
+            SchedReason::Yielding => {
+                current_thread.state = ThreadState::Ready;
+                if current_id != IDLE_THREAD_ID {
+                    ready.push_back(current_id);
+                }
+                DeferredAction::None
             }
-            DeferredAction::None
-        }
-        SchedReason::Exiting => {
-            current_thread.state = ThreadState::Exiting;
-            assert_ne!(current_id, IDLE_THREAD_ID);
-            DeferredAction::Cleanup(current_id)
-        }
-        SchedReason::Waiting => {
-            current_thread.state = ThreadState::Waiting;
-            DeferredAction::None
-        }
-        SchedReason::Sleeping => {
-            current_thread.state = ThreadState::Sleeping;
-            DeferredAction::None
-        }
-    };
+            SchedReason::Exiting => {
+                // we can't clean up the current thread while still on its stack
+                // so we have to switch to the idle thread, run a deferred action and then loop around
+                //
+                // TODO: would this be cleaner if we manually swapped the stacks here instead of the DeferredAction mechanism?
 
-    next_thread.state = ThreadState::Running;
-    mach().current_thread_id.store(next_id.0, Ordering::Relaxed);
+                current_thread.state = ThreadState::Exiting;
+                assert_ne!(current_id, IDLE_THREAD_ID);
+                debug_assert_eq!(next_id, IDLE_THREAD_ID);
+                DeferredAction::Cleanup(current_id)
+            }
+            SchedReason::Waiting => {
+                current_thread.state = ThreadState::Waiting;
+                DeferredAction::None
+            }
+            SchedReason::Sleeping => {
+                current_thread.state = ThreadState::Sleeping;
+                DeferredAction::None
+            }
+        };
 
-    current_thread.proc = mach().current_proc();
-    next_thread.proc.as_ref().map(|x| x.clone().activate());
+        next_thread.state = ThreadState::Running;
+        mach().current_thread_id.store(next_id.0, Ordering::Relaxed);
 
-    let deferred_action = unsafe {
-        *switch(
-            &mut current_thread.regs,
-            &next_thread.regs,
-            &raw const deferred_action,
-        )
-    };
+        current_thread.proc = mach().current_proc();
+        next_thread.proc.as_ref().map(|x| x.clone().activate());
 
-    match deferred_action {
-        DeferredAction::None => false,
-        DeferredAction::Cleanup(thread_id) => {
-            assert_eq!(current_id, IDLE_THREAD_ID);
-            scheduler_guard.clean_up(thread_id);
-            true
+        // switch to the new thread
+        // we pass the deferred action by reading it from the previous stack
+        // (always safe even if exiting since the stack is sure to still exist at this point)
+        let deferred_action = unsafe {
+            *switch(
+                &mut current_thread.regs,
+                &next_thread.regs,
+                &raw const deferred_action,
+            )
+        };
+
+        // we're now in the new thread
+        // all local variables hold values they had before the new thread called sched
+        // so be very careful accessing local variables after this point
+        // do not access any references e.g. current_thread, next_thread
+        yeet_references!(current_thread, next_thread);
+
+        match deferred_action {
+            DeferredAction::None => {}
+            DeferredAction::Cleanup(thread_id) => {
+                assert_eq!(mach().current_thread_id(), IDLE_THREAD_ID);
+                scheduler_guard.clean_up(thread_id);
+                continue;
+            }
         }
+
+        return scheduler_guard;
     }
 }
 
@@ -262,7 +320,7 @@ pub fn thread_exit() -> ! {
 }
 
 pub fn thread_yield() {
-    while sched(SCHEDULER.lock(), SchedReason::Yielding) {}
+    sched(SCHEDULER.lock(), SchedReason::Yielding);
 }
 
 pub unsafe fn init() {
@@ -270,11 +328,7 @@ pub unsafe fn init() {
         stack: KERNEL_STACK_TOP - KERNEL_STACK_SIZE,
         stack_size: KERNEL_STACK_SIZE,
         proc: None,
-        regs: TrapFrame {
-            cs: KERNEL_CODE_SELECTOR.0 as u64,
-            ss: KERNEL_DATA_SELECTOR.0 as u64,
-            ..TrapFrame::default()
-        },
+        regs: SwitchFrame::default(),
         state: ThreadState::Running,
     });
     assert_eq!(id, IDLE_THREAD_ID);
@@ -349,14 +403,14 @@ pub fn thread_sleep(delay_ns: u64) {
     sched(scheduler, SchedReason::Sleeping);
 }
 
-pub unsafe fn timer_interrupt() {
+pub fn timer_interrupt(ctx: &mut IrqContext) {
     mach().ticks.fetch_add(1, Ordering::Relaxed);
     TIMER_QUEUE.lock().tick();
-    while let Some(closure) = TIMER_QUEUE.lock().pop_closure() {
+    while let Some(closure) = { TIMER_QUEUE.lock().pop_closure() } {
         closure();
     }
+    ctx.need_resched();
     unsafe { PICS.lock().notify_end_of_interrupt(32) };
-    thread_yield();
 }
 
 pub struct WaitQueue {

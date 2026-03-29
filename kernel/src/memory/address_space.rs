@@ -8,7 +8,7 @@ use x86_64::{
 };
 
 use crate::{
-    interrupts::TrapFrame,
+    interrupts::{IrqContext, TrapFrame},
     mach::mach,
     memory::{
         FRAME_LAYOUT, PHYSICAL_MEMORY_OFFSET, frame_info::FRAME_SIZE, is_user_address,
@@ -82,16 +82,16 @@ impl Drop for AddressSpace {
     }
 }
 
-fn unhandled_fault(trap: &mut TrapFrame, addr: VirtAddr) -> ! {
+fn unhandled_fault(ctx: &mut IrqContext, addr: VirtAddr) -> ! {
     println!(
         "Page fault at {:#x}, error code: {:#x}",
-        addr, trap.error_code
+        addr, ctx.trap_frame().error_code
     );
-    println!("RIP {:#x}, RSP {:#x}", trap.rip, trap.rsp);
+    println!("RIP {:#x}, RSP {:#x}", ctx.trap_frame().rip, ctx.trap_frame().rsp);
     loop {}
 }
 
-pub unsafe fn page_fault_handler(trap: &mut TrapFrame, addr: VirtAddr) {
+pub fn page_fault_handler(ctx: &mut IrqContext, addr: VirtAddr) {
     if is_user_address(addr) {
         if let Some(proc) = mach().current_proc() {
             let mut memory = proc.memory.lock();
@@ -123,5 +123,5 @@ pub unsafe fn page_fault_handler(trap: &mut TrapFrame, addr: VirtAddr) {
             }
         }
     }
-    unhandled_fault(trap, addr);
+    unhandled_fault(ctx, addr);
 }

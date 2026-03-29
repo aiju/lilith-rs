@@ -1,26 +1,39 @@
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-};
+use core::{cell::UnsafeCell, mem::MaybeUninit, sync::atomic::Ordering};
 
 use spin::{Mutex, MutexGuard};
 
+use crate::mach::mach;
+
 #[must_use = "interrupt guard re-enables interrupts when dropped"]
-pub struct InterruptGuard {
-    were_enabled: bool,
+pub struct InterruptGuard(());
+
+impl InterruptGuard {
+    pub fn drop_would_reenable(&self) -> bool {
+        mach().irq_lock_count.load(Ordering::Relaxed) == 1
+    }
+    pub unsafe fn drop_without_disabling(self) {
+        mach().irq_lock_count.fetch_sub(1, Ordering::Relaxed);
+        core::mem::forget(self);
+    }
+    unsafe fn enter() {
+        x86_64::instructions::interrupts::disable();
+        mach().irq_lock_count.fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe fn leave() {
+        if mach().irq_lock_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            x86_64::instructions::interrupts::enable();
+        }
+    }
 }
 
 pub fn interrupt_guard() -> InterruptGuard {
-    let were_enabled = x86_64::instructions::interrupts::are_enabled();
-    x86_64::instructions::interrupts::disable();
-    InterruptGuard { were_enabled }
+    unsafe { InterruptGuard::enter() };
+    InterruptGuard(())
 }
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
-        if self.were_enabled {
-            x86_64::instructions::interrupts::enable();
-        }
+        unsafe { InterruptGuard::leave() };
     }
 }
 
@@ -77,8 +90,27 @@ impl<T> IrqLock<T> {
             interrupt_guard,
         }
     }
+    pub fn lock_with_interrupt_guard(&self, interrupt_guard: InterruptGuard) -> IrqLockGuard<'_, T> {
+        let guard = self.inner.lock();
+        IrqLockGuard {
+            guard,
+            interrupt_guard,
+        }
+    }
     pub unsafe fn force_unlock(&self) {
-        unsafe { self.inner.force_unlock() };
+        unsafe {
+            self.inner.force_unlock();
+            InterruptGuard::leave();
+        };
+    }
+    pub fn is_locked(&self) -> bool {
+        self.inner.is_locked()
+    }
+}
+
+impl<T> IrqLockGuard<'_, T> {
+    pub fn into_interrupt_guard(guard: Self) -> InterruptGuard {
+        guard.interrupt_guard
     }
 }
 

@@ -29,10 +29,7 @@ use alloc::sync::Arc;
 use bootloader::{BootInfo, entry_point};
 
 use crate::{
-    ramfs::ram_fs,
-    sched::{thread_sleep, thread_spawn},
-    tasks::{task_sleep, task_spawn},
-    user::Proc,
+    ramfs::ram_fs, sched::thread_spawn, tasks::{task_sleep, task_spawn}, user::Proc
 };
 
 #[cfg(not(test))]
@@ -65,12 +62,13 @@ fn os_main() {
 entry_point!(main);
 fn main(boot_info: &'static BootInfo) -> ! {
     unsafe {
-        mach::init();
+        let interrupt_guard = mach::init();
         interrupts::init();
         memory::init(boot_info);
         sched::init();
         tasks::init();
         ramfs::init();
+        drop(interrupt_guard);
     }
 
     #[cfg(test)]
