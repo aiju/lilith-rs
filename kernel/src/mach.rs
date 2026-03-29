@@ -68,25 +68,28 @@ pub const TSS_SELECTOR: SegmentSelector = SegmentSelector(40);
 
 pub unsafe fn init() -> InterruptGuard {
     let mach = unsafe {
-        MACH0.set(Mach {
-            descriptors: UnsafeCell::new(MachDescriptors {
-                gdt: GlobalDescriptorTable::new(),
-                tss: TaskStateSegment::new(),
-                idt: InterruptDescriptorTable::new(),
-            }),
-            current_proc: AtomicPtr::null(),
-            current_thread_id: AtomicUsize::new(0),
-            ticks: AtomicU64::new(0),
-            irq_lock_count: AtomicUsize::new(0),
-            irq_need_resched: AtomicBool::new(false),
-            syscall_saved_user_rsp: AtomicU64::default(),
-        })
+        BootInit::set(
+            &MACH0,
+            Mach {
+                descriptors: UnsafeCell::new(MachDescriptors {
+                    gdt: GlobalDescriptorTable::new(),
+                    tss: TaskStateSegment::new(),
+                    idt: InterruptDescriptorTable::new(),
+                }),
+                current_proc: AtomicPtr::null(),
+                current_thread_id: AtomicUsize::new(0),
+                ticks: AtomicU64::new(0),
+                irq_lock_count: AtomicUsize::new(0),
+                irq_need_resched: AtomicBool::new(false),
+                syscall_saved_user_rsp: AtomicU64::default(),
+            },
+        )
     };
     let interrupt_guard = interrupt_guard();
 
     let MachDescriptors { gdt, tss, idt } = unsafe { &mut *mach.descriptors.get() };
 
-    GsBase::write(VirtAddr::from_ptr(MACH0.get()));
+    GsBase::write(VirtAddr::from_ptr(&*MACH0));
 
     assert_eq!(
         gdt.add_entry(Descriptor::kernel_code_segment()),
@@ -124,7 +127,7 @@ pub unsafe fn init() -> InterruptGuard {
 }
 
 pub fn mach() -> &'static Mach {
-    MACH0.get()
+    &*MACH0
 }
 
 impl Mach {

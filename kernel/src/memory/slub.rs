@@ -1,3 +1,5 @@
+use core::alloc::Layout;
+
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{
@@ -6,7 +8,7 @@ use crate::{
         frame_info::{FRAME_SIZE, FrameInfo, FrameType, frame_info},
         phys_to_virt, virt_to_phys,
     },
-    sync::IrqLock,
+    sync::{BootInit, IrqLock}, util::clog2,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -52,8 +54,8 @@ impl SlabList {
 
 unsafe impl Send for SlabList {}
 
-const NUM_SIZE_CLASSES: usize = 8;
-const SIZE_CLASSES: [usize; NUM_SIZE_CLASSES] = [8, 16, 32, 64, 128, 256, 512, 1024];
+const NUM_SIZE_CLASSES: usize = 11;
+const SIZE_CLASSES: [usize; NUM_SIZE_CLASSES] = [8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 pub const SLUB_MAX: usize = SIZE_CLASSES[NUM_SIZE_CLASSES - 1];
 
 pub struct SlubAllocator {
@@ -81,20 +83,38 @@ impl SlubAllocator {
     }
 }
 
-fn round_up_size(size: usize) -> Option<(usize, usize)> {
-    // TODO: i'm sure we can do better than this
-    let mut index = 0;
-    while index < NUM_SIZE_CLASSES {
-        if size <= SIZE_CLASSES[index] {
+const SIZE_LOOKUP_SIZE: usize = clog2(SLUB_MAX) + 1;
+static SIZE_LOOKUP: BootInit<[usize; SIZE_LOOKUP_SIZE]> = unsafe { BootInit::uninit() };
+
+fn init_size_lookup() {
+    assert!(SLUB_MAX.is_power_of_two());
+    let mut table = [usize::MAX; SIZE_LOOKUP_SIZE];
+    for (index, &value) in SIZE_CLASSES.iter().enumerate() {
+        for i in 0..=clog2(value) as usize {
+            table[i] = table[i].min(index);
+        }
+    }
+    unsafe { BootInit::set(&SIZE_LOOKUP, table) };
+}
+
+fn find_class(layout: Layout) -> Option<(usize, usize)> {
+    let size = layout.size();
+    let align = layout.align();
+    // since sizes are arranged geometrically we look up by clog2
+    // with the current list of sizes guaranteed to terminate in at most 2 iterations
+    // unless you ask for a large alignment on a small allocation in which case we may have to iterate until the end
+    let mut index = SIZE_LOOKUP[clog2(size)];
+    loop {
+        if size <= SIZE_CLASSES[index] && align <= SIZE_CLASSES[index].isolate_lowest_one() {
             return Some((index, SIZE_CLASSES[index]));
         }
         index += 1;
     }
-    None
 }
 
 pub(super) unsafe fn slub_init() {
     let mut slub_allocator = SLUB_ALLOCATOR.lock();
+    init_size_lookup();
     for (index, &size) in SIZE_CLASSES.iter().enumerate() {
         let slab = &mut slub_allocator.slabs[index];
         slab.object_size = size;
@@ -169,8 +189,8 @@ impl SlabCache {
 }
 
 impl SlubAllocator {
-    pub fn alloc(&mut self, desired_size: usize) -> Option<VirtAddr> {
-        let (index, _) = round_up_size(desired_size)?;
+    pub fn alloc(&mut self, layout: Layout) -> Option<VirtAddr> {
+        let (index, _) = find_class(layout)?;
         let fi = self.slabs[index].grab_slab()?;
         let sl = unsafe { &mut (*fi.u.get()).slab_list };
         let p = sl.free_list;

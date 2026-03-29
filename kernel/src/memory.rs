@@ -17,6 +17,7 @@ use crate::memory::{
     buddy::{BUDDY_ALLOCATOR, BUDDY_MAX},
     slub::{SLUB_ALLOCATOR, SLUB_MAX},
 };
+use crate::util::clog2;
 
 pub const PHYSICAL_MEMORY_OFFSET: VirtAddr = VirtAddr::new_truncate(0xFFFF_8000_0000_0000);
 pub const PHYSICAL_MEMORY_MAX_SIZE: usize = 4 * 1024 * 1024 * 1024 * 1024;
@@ -51,15 +52,14 @@ pub unsafe fn phys_to_mut<T>(phys: PhysAddr) -> &'static mut T {
 pub const ZST_SENTINEL: VirtAddr = PHYSICAL_MEMORY_OFFSET;
 
 pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
-    // TODO: this only works bc SLUB allocator only uses power-of-two sizes!!
     let effective_size = layout.size().max(layout.align());
     if layout.size() == 0 {
         Some(ZST_SENTINEL)
-    } else if effective_size <= SLUB_MAX {
-        SLUB_ALLOCATOR.lock().alloc(effective_size)
+    } else if effective_size <= SLUB_MAX { // equivalent to size <= SLUB_MAX && align <= SLUB_MAX
+        SLUB_ALLOCATOR.lock().alloc(layout)
     } else if effective_size <= BUDDY_MAX {
-        let n = usize::BITS - (effective_size - 1).leading_zeros() - FRAME_SHIFT as u32;
-        BUDDY_ALLOCATOR.lock().alloc(n as usize).map(phys_to_virt)
+        let order = clog2(effective_size) - FRAME_SHIFT;
+        BUDDY_ALLOCATOR.lock().alloc(order).map(phys_to_virt)
     } else {
         None
     }

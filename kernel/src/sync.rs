@@ -1,4 +1,4 @@
-use core::{cell::UnsafeCell, mem::MaybeUninit, sync::atomic::Ordering};
+use core::{cell::UnsafeCell, mem::MaybeUninit, ops::Deref, sync::atomic::Ordering};
 
 use spin::{Mutex, MutexGuard};
 
@@ -53,15 +53,20 @@ impl<T> BootInit<T> {
             inner: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
-    pub fn get(&self) -> &T {
+    pub unsafe fn set(cell: &Self, value: T) -> &T {
+        unsafe { core::ptr::write(cell.inner.get(), MaybeUninit::new(value)) };
+        cell
+    }
+    pub unsafe fn as_mut_ptr(cell: &Self) -> *mut T {
+        unsafe { MaybeUninit::as_mut_ptr(cell.inner.get().as_mut_unchecked()) }
+    }
+}
+
+impl<T> Deref for BootInit<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
         unsafe { (*self.inner.get()).assume_init_ref() }
-    }
-    pub unsafe fn set(&self, value: T) -> &T {
-        unsafe { core::ptr::write(self.inner.get(), MaybeUninit::new(value)) };
-        self.get()
-    }
-    pub unsafe fn as_mut_ptr(&self) -> *mut T {
-        unsafe { MaybeUninit::as_mut_ptr(self.inner.get().as_mut_unchecked()) }
     }
 }
 

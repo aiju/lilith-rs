@@ -4,6 +4,7 @@
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![feature(atomic_ptr_null)]
+#![feature(isolate_most_least_significant_one)]
 #![allow(dead_code)]
 
 mod id_vec;
@@ -20,6 +21,7 @@ mod tasks;
 mod test;
 mod user;
 mod vga_buffer;
+mod util;
 
 extern crate alloc;
 
