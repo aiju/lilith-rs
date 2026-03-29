@@ -7,6 +7,7 @@ mod buddy;
 mod frame_info;
 mod slub;
 mod debug_info;
+mod rbtree;
 
 pub use address_space::AddressSpace;
 pub use address_space::page_fault_handler;

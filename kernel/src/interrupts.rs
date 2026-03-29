@@ -5,7 +5,7 @@ use core::{arch::naked_asm, sync::atomic::Ordering};
 use crate::{
     interrupts::tables::Interrupt,
     mach::{
-        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, Mach, MachDescriptors, USER_CODE_SELECTOR,
+        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, Mach, USER_CODE_SELECTOR,
         USER_DATA_SELECTOR, mach,
     },
     memory::page_fault_handler,
@@ -22,7 +22,7 @@ use x86_64::{
         model_specific::{LStar, SFMask, Star},
         rflags::RFlags,
     },
-    structures::tss::TaskStateSegment,
+    structures::{idt::InterruptDescriptorTable, tss::TaskStateSegment},
 };
 
 mod tables;
@@ -240,7 +240,7 @@ extern "C" fn syscall_entry() {
         "swapgs",
         "sysretq",
         syscall_handler = sym syscall_handler,
-        kernel_rsp_offset = const core::mem::offset_of!(Mach, descriptors) + core::mem::offset_of!(MachDescriptors, tss.privilege_stack_table),
+        kernel_rsp_offset = const core::mem::offset_of!(Mach, descriptors.tss) + core::mem::offset_of!(TaskStateSegment, privilege_stack_table),
         user_rsp_offset = const core::mem::offset_of!(Mach, syscall_saved_user_rsp),
         cs = const USER_CODE_SELECTOR.0 as u64,
         ss = const USER_DATA_SELECTOR.0 as u64,
@@ -265,12 +265,12 @@ unsafe fn init_pit() {
     }
 }
 
-pub unsafe fn init() {
-    let MachDescriptors { idt, tss, .. } = unsafe { &mut *mach().descriptors.get() };
-
+pub unsafe fn fill_idt_tss(idt: &mut InterruptDescriptorTable, tss: &mut TaskStateSegment) {
     set_ist_stack(tss, DOUBLE_FAULT_IST_INDEX, &raw mut DOUBLE_FAULT_STACK);
     tables::fill_idt(idt);
+}
 
+pub unsafe fn init() {
     unsafe {
         let mut pics = PICS.lock();
         pics.initialize();

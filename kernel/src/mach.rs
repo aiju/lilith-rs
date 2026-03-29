@@ -26,12 +26,15 @@ use crate::{
 
 pub struct MachDescriptors {
     pub gdt: GlobalDescriptorTable,
-    pub tss: TaskStateSegment,
+    pub tss: UnsafeCell<TaskStateSegment>,
     pub idt: InterruptDescriptorTable,
 }
 
+// this is ok because we don't have any safe methods that mutate anything
+unsafe impl Sync for MachDescriptors {}
+
 pub struct Mach {
-    pub descriptors: UnsafeCell<MachDescriptors>,
+    pub descriptors: MachDescriptors,
     pub current_thread_id: AtomicUsize,
     pub current_proc: AtomicPtr<Proc>,
 
@@ -67,15 +70,15 @@ pub const USER_CODE_SELECTOR: SegmentSelector = SegmentSelector(35);
 pub const TSS_SELECTOR: SegmentSelector = SegmentSelector(40);
 
 pub unsafe fn init() -> InterruptGuard {
-    let mach = unsafe {
+    unsafe {
         BootInit::set(
             &MACH0,
             Mach {
-                descriptors: UnsafeCell::new(MachDescriptors {
+                descriptors: MachDescriptors {
                     gdt: GlobalDescriptorTable::new(),
-                    tss: TaskStateSegment::new(),
+                    tss: UnsafeCell::new(TaskStateSegment::new()),
                     idt: InterruptDescriptorTable::new(),
-                }),
+                },
                 current_proc: AtomicPtr::null(),
                 current_thread_id: AtomicUsize::new(0),
                 ticks: AtomicU64::new(0),
@@ -85,11 +88,17 @@ pub unsafe fn init() -> InterruptGuard {
             },
         )
     };
+    let Mach {
+        descriptors:
+            MachDescriptors {
+                gdt,
+                idt,
+                tss,
+            },
+        ..
+    } = unsafe { BootInit::as_mut(&MACH0) };
+    let tss = tss.get_mut();
     let interrupt_guard = interrupt_guard();
-
-    let MachDescriptors { gdt, tss, idt } = unsafe { &mut *mach.descriptors.get() };
-
-    GsBase::write(VirtAddr::from_ptr(&*MACH0));
 
     assert_eq!(
         gdt.add_entry(Descriptor::kernel_code_segment()),
@@ -116,12 +125,15 @@ pub unsafe fn init() -> InterruptGuard {
     assert_eq!(USER_DATA_SELECTOR.0 + 8, USER_CODE_SELECTOR.0);
 
     unsafe {
+        crate::interrupts::fill_idt_tss(idt, tss);
+
         gdt.load_unsafe();
         CS::set_reg(KERNEL_CODE_SELECTOR);
         DS::set_reg(KERNEL_DATA_SELECTOR);
         ES::set_reg(KERNEL_DATA_SELECTOR);
         load_tss(TSS_SELECTOR);
         idt.load_unsafe();
+        GsBase::write(VirtAddr::from_ptr(&*MACH0));
     }
     interrupt_guard
 }
@@ -143,5 +155,8 @@ impl Mach {
     }
     pub fn ticks(&self) -> u64 {
         self.ticks.load(Ordering::Relaxed)
+    }
+    pub unsafe fn set_kernel_rsp(&self, rsp: VirtAddr) {
+        unsafe { (*self.descriptors.tss.get()).privilege_stack_table[0] = rsp };
     }
 }

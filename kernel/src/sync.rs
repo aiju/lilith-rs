@@ -45,7 +45,7 @@ pub struct BootInit<T> {
     inner: UnsafeCell<MaybeUninit<T>>,
 }
 
-unsafe impl<T> Sync for BootInit<T> {}
+unsafe impl<T> Sync for BootInit<T> where T: Sync {}
 
 impl<T> BootInit<T> {
     pub const unsafe fn uninit() -> Self {
@@ -57,8 +57,8 @@ impl<T> BootInit<T> {
         unsafe { core::ptr::write(cell.inner.get(), MaybeUninit::new(value)) };
         cell
     }
-    pub unsafe fn as_mut_ptr(cell: &Self) -> *mut T {
-        unsafe { MaybeUninit::as_mut_ptr(cell.inner.get().as_mut_unchecked()) }
+    pub unsafe fn as_mut(cell: &Self) -> &mut T {
+        unsafe { (*cell.inner.get()).assume_init_mut() }
     }
 }
 

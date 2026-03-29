@@ -96,7 +96,7 @@ impl ActiveProc {
         unsafe {
             let interrupt_guard = interrupt_guard();
             let (_, stack_top) = thread_stack();
-            (*mach().descriptors.get()).tss.privilege_stack_table[0] = stack_top;
+            mach().set_kernel_rsp(stack_top);
             // let IRETQ re-enable interrupts
             interrupt_guard.drop_without_disabling();
             asm!(
