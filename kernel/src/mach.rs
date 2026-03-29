@@ -1,4 +1,7 @@
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
+};
 
 use alloc::sync::Arc;
 use x86_64::{
@@ -16,16 +19,10 @@ use x86_64::{
 };
 
 use crate::{
-    sched::ThreadId, sync::{BootInit, InterruptGuard, IrqLock, interrupt_guard}, user::Proc
+    sched::ThreadId,
+    sync::{BootInit, InterruptGuard, interrupt_guard},
+    user::Proc,
 };
-
-#[repr(C)]
-// in kernel mode this is accessible via GS: prefix
-// syscall_entry knows the layout of this struct!!
-pub struct MachGsSpace {
-    pub kernel_rsp: u64,
-    pub user_rsp: u64,
-}
 
 pub struct MachDescriptors {
     pub gdt: GlobalDescriptorTable,
@@ -34,37 +31,34 @@ pub struct MachDescriptors {
 }
 
 pub struct Mach {
-    pub descriptors: IrqLock<MachDescriptors>,
+    pub descriptors: UnsafeCell<MachDescriptors>,
     pub current_thread_id: AtomicUsize,
     pub current_proc: AtomicPtr<Proc>,
 
     /// this counter counts how many reasons there are for interrupts to be disabled (mostly IrqLocks that are held)
-    /// 
+    ///
     /// important invariants:
     /// 1. interrupt flag is set iff irq_lock_count != 0
     /// 2. irq_lock_count == 1 when calling sched() (only the scheduler lock is held)
-    /// 
+    ///
     /// corolloraries:
-    /// 1. the interrupt common routine has to increment/decrement the count
-    /// 2. 'blocking' interrupt handlers may call sched but have to accept interrupts being re-enabled
-    /// 3. 'non-blocking' interrupt handlers have to rely on irq_need_resched to call sched for them (which fiddles with the count)
+    /// 1. IrqLocks and InterruptGuards increment/decrement the count
+    /// 2. the interrupt entry point has to increment/decrement the count
+    /// 3. 'blocking' interrupt handlers may call sched but have to accept interrupts being re-enabled
+    /// 4. 'non-blocking' interrupt handlers have to rely on irq_need_resched to call sched for them (which fiddles with the count)
     pub irq_lock_count: AtomicUsize,
 
     /// interrupt handlers can set this flag to mark that rescheduling is needed when falling out of the interrupt handler
-    /// 
+    ///
     /// the flag is only acted upon when irq_lock_count == 1 at the end of the handler
     pub irq_need_resched: AtomicBool,
     pub ticks: AtomicU64,
-    gs_space: *mut MachGsSpace, // because we allow magic access through GS cannot be a reference
+
+    /// the syscall stub uses this is a scratch space to briefly stash the user rsp while we load the kernel stack
+    pub syscall_saved_user_rsp: AtomicU64,
 }
 
 static MACH0: BootInit<Mach> = unsafe { BootInit::uninit() };
-
-// instead of a spin::Mutex this should probably be something that disables interrupts and panics if locked or smth
-static mut MACH_GS_SPACE: MachGsSpace = MachGsSpace {
-    kernel_rsp: 0,
-    user_rsp: 0,
-};
 
 pub const KERNEL_CODE_SELECTOR: SegmentSelector = SegmentSelector(8);
 pub const KERNEL_DATA_SELECTOR: SegmentSelector = SegmentSelector(16);
@@ -75,7 +69,7 @@ pub const TSS_SELECTOR: SegmentSelector = SegmentSelector(40);
 pub unsafe fn init() -> InterruptGuard {
     let mach = unsafe {
         MACH0.set(Mach {
-            descriptors: IrqLock::new(MachDescriptors {
+            descriptors: UnsafeCell::new(MachDescriptors {
                 gdt: GlobalDescriptorTable::new(),
                 tss: TaskStateSegment::new(),
                 idt: InterruptDescriptorTable::new(),
@@ -85,19 +79,14 @@ pub unsafe fn init() -> InterruptGuard {
             ticks: AtomicU64::new(0),
             irq_lock_count: AtomicUsize::new(0),
             irq_need_resched: AtomicBool::new(false),
-            gs_space: &raw mut MACH_GS_SPACE,
+            syscall_saved_user_rsp: AtomicU64::default(),
         })
     };
     let interrupt_guard = interrupt_guard();
 
-    let mut descriptor_guard = mach.descriptors.lock();
-    let MachDescriptors {
-        ref mut gdt,
-        ref mut tss,
-        ref mut idt,
-    } = *descriptor_guard;
+    let MachDescriptors { gdt, tss, idt } = unsafe { &mut *mach.descriptors.get() };
 
-    GsBase::write(VirtAddr::from_ptr(mach.gs_space));
+    GsBase::write(VirtAddr::from_ptr(MACH0.get()));
 
     assert_eq!(
         gdt.add_entry(Descriptor::kernel_code_segment()),
@@ -139,12 +128,6 @@ pub fn mach() -> &'static Mach {
 }
 
 impl Mach {
-    pub fn gs_space(&self) -> &MachGsSpace {
-        unsafe { self.gs_space.as_ref_unchecked() }
-    }
-    pub fn gs_space_mut(&self) -> &mut MachGsSpace {
-        unsafe { self.gs_space.as_mut_unchecked() }
-    }
     pub fn current_proc(&self) -> Option<Arc<Proc>> {
         let ptr = self.current_proc.load(Ordering::Relaxed);
         (!ptr.is_null()).then(|| unsafe {

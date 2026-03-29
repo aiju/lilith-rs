@@ -3,10 +3,15 @@ use crate::prelude::*;
 use core::{arch::naked_asm, sync::atomic::Ordering};
 
 use crate::{
-    interrupts::tables::Interrupt, mach::{
-        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, MachDescriptors, USER_CODE_SELECTOR,
+    interrupts::tables::Interrupt,
+    mach::{
+        KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, Mach, MachDescriptors, USER_CODE_SELECTOR,
         USER_DATA_SELECTOR, mach,
-    }, memory::page_fault_handler, print, sched::{SCHEDULER, SchedReason, sched, thread_sleep, timer_interrupt}, sync::{InterruptGuard, IrqLock, IrqLockGuard, interrupt_guard}
+    },
+    memory::page_fault_handler,
+    print,
+    sched::{SCHEDULER, SchedReason, sched, thread_sleep, timer_interrupt},
+    sync::{InterruptGuard, IrqLock, IrqLockGuard, interrupt_guard},
 };
 use pic8259::ChainedPics;
 use x86_64::{
@@ -62,6 +67,8 @@ pub struct TrapFrame {
     pub rsp: u64,
     pub ss: u64,
 }
+
+const SYSCALL_SENTINEL_INT_NUM: u64 = 256;
 
 #[unsafe(naked)]
 extern "C" fn int_common_entry() {
@@ -187,15 +194,15 @@ extern "C" fn syscall_handler(trap: &mut TrapFrame) {
 extern "C" fn syscall_entry() {
     naked_asm!(
         "swapgs",
-        "mov gs:8, rsp",
-        "mov rsp, gs:0",
+        "mov gs:{user_rsp_offset}, rsp",
+        "mov rsp, gs:{kernel_rsp_offset}",
+        "push {ss}",
+        "push gs:{user_rsp_offset}",
+        "push r11",
+        "push {cs}",
+        "push rcx",
         "push 0",
-        "push 0",
-        "push 0",
-        "push 0",
-        "push 0",
-        "push 0",
-        "push 0",
+        "push {SYSCALL_SENTINEL}",
         "push r15",
         "push r14",
         "push r13",
@@ -229,14 +236,17 @@ extern "C" fn syscall_entry() {
         "pop r13",
         "pop r14",
         "pop r15",
-        "add rsp, 7*8",
-        "mov rsp, gs:8",
+        "mov rsp, [rsp+8*5]",
         "swapgs",
         "sysretq",
-        syscall_handler = sym syscall_handler
+        syscall_handler = sym syscall_handler,
+        kernel_rsp_offset = const core::mem::offset_of!(Mach, descriptors) + core::mem::offset_of!(MachDescriptors, tss.privilege_stack_table),
+        user_rsp_offset = const core::mem::offset_of!(Mach, syscall_saved_user_rsp),
+        cs = const USER_CODE_SELECTOR.0 as u64,
+        ss = const USER_DATA_SELECTOR.0 as u64,
+        SYSCALL_SENTINEL = const SYSCALL_SENTINEL_INT_NUM,
     )
 }
-
 
 const PIT_FREQUENCY: u32 = 1_193_182;
 const DESIRED_HZ: u32 = 100;
@@ -256,12 +266,7 @@ unsafe fn init_pit() {
 }
 
 pub unsafe fn init() {
-    let mut guard = mach().descriptors.lock();
-    let MachDescriptors {
-        ref mut idt,
-        ref mut tss,
-        ..
-    } = *guard;
+    let MachDescriptors { idt, tss, .. } = unsafe { &mut *mach().descriptors.get() };
 
     set_ist_stack(tss, DOUBLE_FAULT_IST_INDEX, &raw mut DOUBLE_FAULT_STACK);
     tables::fill_idt(idt);

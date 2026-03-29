@@ -4,6 +4,7 @@
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![feature(atomic_ptr_null)]
+#![allow(dead_code)]
 
 mod id_vec;
 mod interrupts;
@@ -55,7 +56,7 @@ fn os_main() {
         let active_proc = root_proc.activate();
         let data = ram_fs().get("cat").unwrap();
         let entry = active_proc.load_elf(data);
-        unsafe { active_proc.run(entry) };
+        unsafe { active_proc.launch(entry) };
     });
 }
 

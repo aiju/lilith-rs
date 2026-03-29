@@ -8,7 +8,7 @@ use x86_64::{
 };
 
 use crate::{
-    interrupts::{IrqContext, TrapFrame},
+    interrupts::IrqContext,
     mach::mach,
     memory::{
         FRAME_LAYOUT, PHYSICAL_MEMORY_OFFSET, frame_info::FRAME_SIZE, is_user_address,

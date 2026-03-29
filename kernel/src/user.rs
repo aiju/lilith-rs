@@ -88,14 +88,17 @@ impl ActiveProc {
         elf.header.pt2.entry_point()
     }
 
-    pub unsafe fn run(&self, entry: u64) -> ! {
+    /// launch replaces the current kernel thread with a user process
+    /// 
+    /// in particular the current kernel thread is destroyed and re-used for syscalls and interrupts of that user process
+    pub unsafe fn launch(&self, entry: u64) -> ! {
         println!("go to user!!");
         unsafe {
-            x86_64::instructions::interrupts::disable();
+            let interrupt_guard = interrupt_guard();
             let (_, stack_top) = thread_stack();
-            let mach = mach();
-            mach.descriptors.lock().tss.privilege_stack_table[0] = stack_top;
-            mach.gs_space_mut().kernel_rsp = stack_top.as_u64();
+            (*mach().descriptors.get()).tss.privilege_stack_table[0] = stack_top;
+            // let IRETQ re-enable interrupts
+            interrupt_guard.drop_without_disabling();
             asm!(
                 "push {ds_sel}",     // SS
                 "push {stack}",      // RSP
