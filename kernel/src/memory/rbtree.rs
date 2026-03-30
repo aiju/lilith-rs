@@ -1,7 +1,6 @@
 use core::{
-    alloc::Layout,
+    marker::PhantomData,
     ptr::{null, null_mut},
-    sync::atomic::{AtomicPtr, Ordering},
 };
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -18,7 +17,7 @@ enum Direction {
 }
 use Direction::*;
 
-use crate::{memory::kernel_alloc, serial_print, serial_println};
+use crate::serial_println;
 
 impl core::ops::Not for Direction {
     type Output = Direction;
@@ -31,22 +30,61 @@ impl core::ops::Not for Direction {
     }
 }
 
-struct RbNode<T> {
-    color: Color,
-    parent: *mut RbNode<T>,
-    left: *mut RbNode<T>,
-    right: *mut RbNode<T>,
-    value: T,
+pub trait Augment<T>: Default {
+    fn augment(node: &T, left: &Self, right: &Self) -> Self;
 }
 
-impl<T> RbNode<T> {
-    fn child(&self, dir: Direction) -> *mut RbNode<T> {
+impl<T> Augment<T> for () {
+    fn augment(_node: &T, _left: &Self, _right: &Self) -> Self {
+        ()
+    }
+}
+
+pub struct RbNode<T, V> {
+    color: Color,
+    parent: *mut RbNode<T, V>,
+    left: *mut RbNode<T, V>,
+    right: *mut RbNode<T, V>,
+    value: T,
+    augment: V,
+}
+
+impl<T, V: Default> RbNode<T, V> {
+    pub fn new(value: T) -> Self {
+        RbNode {
+            color: Red,
+            parent: null_mut(),
+            left: null_mut(),
+            right: null_mut(),
+            value,
+            augment: V::default(),
+        }
+    }
+}
+
+impl<T, V> RbNode<T, V> {
+    pub fn left(&self) -> Option<&RbNode<T, V>> {
+        unsafe { self.left.as_ref() }
+    }
+    pub fn right(&self) -> Option<&RbNode<T, V>> {
+        unsafe { self.right.as_ref() }
+    }
+    pub fn parent(&self) -> Option<&RbNode<T, V>> {
+        unsafe { self.parent.as_ref() }
+    }
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+    pub fn augment(&self) -> &V {
+        &self.augment
+    }
+    fn child(&self, dir: Direction) -> *mut RbNode<T, V> {
         match dir {
             Left => self.left,
             Right => self.right,
         }
     }
-    fn set_child(&mut self, dir: Direction, value: *mut RbNode<T>) {
+    fn set_child(&mut self, dir: Direction, value: *mut RbNode<T, V>) {
         match dir {
             Left => self.left = value,
             Right => self.right = value,
@@ -55,11 +93,11 @@ impl<T> RbNode<T> {
             unsafe { (*value).parent = self };
         }
     }
-    fn child_dir(&self, child: *mut RbNode<T>) -> Direction {
+    fn child_dir(&self, child: *mut RbNode<T, V>) -> Direction {
         assert!(self.left == child || self.right == child);
         if self.left == child { Left } else { Right }
     }
-    fn grandparent(&self) -> *mut RbNode<T> {
+    fn grandparent(&self) -> *mut RbNode<T, V> {
         unsafe {
             if !self.parent.is_null() {
                 (*self.parent).parent
@@ -68,7 +106,7 @@ impl<T> RbNode<T> {
             }
         }
     }
-    fn uncle(&self) -> *mut RbNode<T> {
+    fn uncle(&self) -> *mut RbNode<T, V> {
         unsafe {
             let grandparent = self.grandparent();
             if !grandparent.is_null() {
@@ -84,15 +122,15 @@ impl<T> RbNode<T> {
     }
 }
 
-struct RbTree<T> {
-    head: *mut RbNode<T>,
+pub struct RbTree<T, V> {
+    head: *mut RbNode<T, V>,
 }
 
-fn color<T>(node: *mut RbNode<T>) -> Color {
+fn color<T, V>(node: *mut RbNode<T, V>) -> Color {
     unsafe { if node.is_null() { Black } else { (*node).color } }
 }
 
-fn place<T: Ord>(head: *mut *mut RbNode<T>, node: *mut RbNode<T>) {
+fn place<T: Ord, V>(head: *mut *mut RbNode<T, V>, node: *mut RbNode<T, V>) {
     unsafe {
         (*node).color = Red;
         (*node).left = null_mut();
@@ -113,38 +151,7 @@ fn place<T: Ord>(head: *mut *mut RbNode<T>, node: *mut RbNode<T>) {
     }
 }
 
-fn recolor<T>(mut node: *mut RbNode<T>) -> *mut RbNode<T> {
-    // we know node is red
-    // parent might also be red, which we try to fix by just recoloring nodes
-    // red invariant holds for the rest of the tree though
-    // and black invariant holds since we added only a red node so far
-    unsafe {
-        loop {
-            let parent = (*node).parent;
-            let grandparent = (*node).grandparent();
-            let uncle = (*node).uncle();
-            if color(parent) == Red && color(uncle) == Red {
-                // if we land here then we know for sure:
-                // 1. parent, grandparent and uncle all exist (implied by color(uncle)==Red)
-                // 2. grandparent is black (red-invariant previously held)
-                // 3. red invariant is now broken bc self and parent are both red
-                //
-                // try to fix the red invariant by flipping all three
-                // this preserves the black invariant but we might have broken red invariant for grandparent
-                (*grandparent).color = Red;
-                (*parent).color = Black;
-                (*uncle).color = Black;
-                node = grandparent;
-            } else {
-                break;
-            }
-        }
-    }
-    // node is red, either parent or uncle is black
-    node
-}
-
-fn successor<T>(node: *mut RbNode<T>) -> *mut RbNode<T> {
+fn successor<T, V>(node: *mut RbNode<T, V>) -> *mut RbNode<T, V> {
     unsafe {
         let mut n = (*node).right;
         while !(*n).left.is_null() {
@@ -154,11 +161,76 @@ fn successor<T>(node: *mut RbNode<T>) -> *mut RbNode<T> {
     }
 }
 
-impl<T> RbTree<T>
+impl<T, V> RbTree<T, V> {
+    pub const fn new() -> Self {
+        RbTree { head: null_mut() }
+    }
+    pub fn head(&self) -> Option<&RbNode<T, V>> {
+        unsafe { self.head.as_ref() }
+    }
+}
+
+impl<T, V> RbTree<T, V>
 where
     T: Ord,
+    V: Augment<T>,
 {
-    fn replace_node(&mut self, node: *mut RbNode<T>, replacement: *mut RbNode<T>) {
+    fn recolor(&mut self, mut node: *mut RbNode<T, V>) -> *mut RbNode<T, V> {
+        // we know node is red
+        // parent might also be red, which we try to fix by just recoloring nodes
+        // red invariant holds for the rest of the tree though
+        // and black invariant holds since we added only a red node so far
+        unsafe {
+            loop {
+                let parent = (*node).parent;
+                let grandparent = (*node).grandparent();
+                let uncle = (*node).uncle();
+                if color(parent) == Red && color(uncle) == Red {
+                    // if we land here then we know for sure:
+                    // 1. parent, grandparent and uncle all exist (implied by color(uncle)==Red)
+                    // 2. grandparent is black (red-invariant previously held)
+                    // 3. red invariant is now broken bc self and parent are both red
+                    //
+                    // try to fix the red invariant by flipping all three
+                    // this preserves the black invariant but we might have broken red invariant for grandparent
+                    (*grandparent).color = Red;
+                    (*parent).color = Black;
+                    (*uncle).color = Black;
+                    node = grandparent;
+                } else {
+                    break;
+                }
+            }
+        }
+        // node is red, either parent or uncle is black
+        node
+    }
+    fn update_augment(&mut self, node: *mut RbNode<T, V>) {
+        serial_println!("update_augment {:?}", node);
+        unsafe {
+            if node.is_null() {
+                return;
+            }
+            let left = if (*node).left.is_null() {
+                &V::default()
+            } else {
+                &(*(*node).left).augment
+            };
+            let right = if (*node).right.is_null() {
+                &V::default()
+            } else {
+                &(*(*node).right).augment
+            };
+            (*node).augment = V::augment(&(*node).value, left, right);
+        }
+    }
+    fn update_augment_up(&mut self, mut node: *mut RbNode<T, V>) {
+        while node != null_mut() {
+            self.update_augment(node);
+            node = unsafe { (*node).parent };
+        }
+    }
+    fn replace_node(&mut self, node: *mut RbNode<T, V>, replacement: *mut RbNode<T, V>) {
         unsafe {
             let parent = (*node).parent;
             if parent.is_null() {
@@ -171,7 +243,7 @@ where
             }
         }
     }
-    fn rotate(&mut self, node: *mut RbNode<T>) {
+    fn rotate(&mut self, node: *mut RbNode<T, V>) {
         // we know that node is red, parent is red, grandparent is black
         unsafe {
             let mut parent = (*node).parent;
@@ -200,19 +272,43 @@ where
             (*grandparent).color = Red;
         }
     }
-    fn insert(&mut self, node: *mut RbNode<T>) {
+    pub fn find(
+        &self,
+        mut eval: impl FnMut(&T, &V) -> core::cmp::Ordering,
+    ) -> Option<*mut RbNode<T, V>> {
+        unsafe {
+            let mut node = self.head;
+            while !node.is_null() {
+                match eval(&(*node).value, &(*node).augment) {
+                    core::cmp::Ordering::Greater => node = (*node).left,
+                    core::cmp::Ordering::Equal => return Some(node),
+                    core::cmp::Ordering::Less => node = (*node).right,
+                }
+            }
+            None
+        }
+    }
+    pub fn insert(&mut self, node: *mut RbNode<T, V>) {
         unsafe {
             place(&raw mut self.head, node);
-            let w_node = recolor(node);
+            let w_node = self.recolor(node);
             if color((*w_node).parent) == Red {
+                let parent = (*w_node).parent;
+                let grandparent = (*w_node).grandparent();
                 self.rotate(w_node);
+                self.update_augment(grandparent);
+                self.update_augment(parent);
             }
+            self.update_augment_up(node);
         }
     }
     // removes the node, retaining the correct order
     // returns (parent, child, removed_color) for the location where we broke red-black invariants
     // parent and child may both be null
-    fn unplace(&mut self, node: *mut RbNode<T>) -> (*mut RbNode<T>, *mut RbNode<T>, Color) {
+    fn unplace(
+        &mut self,
+        node: *mut RbNode<T, V>,
+    ) -> (*mut RbNode<T, V>, *mut RbNode<T, V>, Color) {
         unsafe {
             match ((*node).left.is_null(), (*node).right.is_null()) {
                 (true, _) => {
@@ -238,12 +334,13 @@ where
                     (*succ).set_child(Left, (*node).left);
                     (*succ).set_child(Right, (*node).right);
                     core::mem::swap(&mut (*node).color, &mut (*succ).color);
+                    self.update_augment_up(fixup_parent);
                     (fixup_parent, replacement, (*node).color)
                 }
             }
         }
     }
-    fn remove_fixup(&mut self, mut parent: *mut RbNode<T>, mut deficit_side: Direction) {
+    fn remove_fixup(&mut self, mut parent: *mut RbNode<T, V>, mut deficit_side: Direction) {
         unsafe {
             loop {
                 let mut sibling = (*parent).child(!deficit_side);
@@ -253,6 +350,8 @@ where
                     self.replace_node(parent, sibling);
                     (*sibling).set_child(deficit_side, parent);
                     (*parent).set_child(!deficit_side, sibling_child);
+                    self.update_augment(parent);
+                    self.update_augment(sibling);
                     core::mem::swap(&mut (*sibling).color, &mut (*parent).color);
                     sibling = sibling_child;
                 }
@@ -282,6 +381,8 @@ where
                     (*parent).set_child(!deficit_side, inner_child);
                     (*inner_child).set_child(!deficit_side, sibling);
                     (*sibling).set_child(deficit_side, grand_child);
+                    self.update_augment(sibling);
+                    self.update_augment(inner_child);
                     core::mem::swap(&mut (*sibling).color, &mut (*inner_child).color);
                     sibling = inner_child;
                 }
@@ -291,6 +392,8 @@ where
                 self.replace_node(parent, sibling);
                 (*sibling).set_child(deficit_side, parent);
                 (*parent).set_child(!deficit_side, inner_child);
+                self.update_augment(parent);
+                self.update_augment(sibling);
                 (*sibling).color = (*parent).color;
                 (*parent).color = Black;
                 (*outer_child).color = Black;
@@ -298,7 +401,7 @@ where
             }
         }
     }
-    fn remove(&mut self, node: *mut RbNode<T>) {
+    pub fn remove(&mut self, node: *mut RbNode<T, V>) {
         unsafe {
             let (fixup_parent, fixup_child, removed_color) = self.unplace(node);
             if removed_color == Red {
@@ -317,109 +420,188 @@ where
                 };
                 self.remove_fixup(fixup_parent, deficit_side);
             }
+            self.update_augment_up(fixup_parent);
         }
     }
 }
 
-fn print_tree<T: core::fmt::Debug>(node: *mut RbNode<T>, depth: i32) {
-    unsafe {
-        for _ in 0..depth {
-            serial_print!("+");
-        }
-        if color(node) == Red {
-            serial_print!("R ");
-        } else {
-            serial_print!("B ");
-        }
-        if node.is_null() {
-            serial_println!("nil");
-        } else {
-            serial_println!("{:?}", (*node).value);
-            print_tree((*node).left, depth + 1);
-            print_tree((*node).right, depth + 1);
-        }
+impl<T: Ord, V: Augment<T> + Eq + core::fmt::Debug> RbTree<T, V> {
+    pub fn check(&self) {
+        crate::memory::rbtree::tests::tree_check(self.head, null_mut(), None, None);
     }
 }
 
-fn tree_check<T: Ord>(
-    node: *mut RbNode<T>,
-    parent: *mut RbNode<T>,
-    min: Option<&T>,
-    max: Option<&T>,
-) -> u32 {
-    unsafe {
-        if node.is_null() {
-            return 1;
-        }
-        assert_eq!((*node).parent, parent);
-        assert!(color(node) == Black || color((*node).left) == Black);
-        assert!(color(node) == Black || color((*node).right) == Black);
-        if let Some(min) = min {
-            assert!((*node).value >= *min);
-        }
-        if let Some(max) = max {
-            assert!((*node).value <= *max);
-        }
-        let left_depth = tree_check((*node).left, node, min, Some(&(*node).value));
-        let right_depth = tree_check((*node).right, node, Some(&(*node).value), max);
-        assert_eq!(left_depth, right_depth);
-        left_depth + ((color(node) == Black) as u32)
-    }
-}
-
-fn pick_random<T>(rng: &mut fastrand::Rng, node: *mut RbNode<T>) -> *mut RbNode<T> {
-    unsafe {
-        loop {
-            match rng.i32(0..3) {
-                0 => return node,
-                1 => {
-                    if !(*node).left.is_null() {
-                        return pick_random(rng, (*node).left);
-                    }
+impl<T, V> RbTree<T, V> {
+    pub fn iter(&self) -> RbTreeIterator<'_, T, V> {
+        let mut node = self.head;
+        unsafe {
+            if !node.is_null() {
+                while !(*node).left.is_null() {
+                    node = (*node).left;
                 }
-                2 => {
-                    if !(*node).right.is_null() {
-                        return pick_random(rng, (*node).right);
+            }
+        }
+        RbTreeIterator {
+            node,
+            _phantom: PhantomData::default(),
+        }
+    }
+}
+
+pub struct RbTreeIterator<'a, T, V> {
+    node: *mut RbNode<T, V>,
+    _phantom: PhantomData<&'a RbNode<T, V>>,
+}
+
+impl<'a, T, V> Iterator for RbTreeIterator<'a, T, V> {
+    type Item = &'a RbNode<T, V>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.node.is_null() {
+            None
+        } else {
+            unsafe {
+                let ret = self.node;
+                if (*self.node).right.is_null() {
+                    loop {
+                        let child = self.node;
+                        self.node = (*self.node).parent;
+                        if self.node.is_null() || (*self.node).left == child {
+                            break;
+                        }
                     }
+                } else {
+                    self.node = successor(self.node);
                 }
-                _ => unreachable!(),
+                Some(&*ret)
             }
         }
     }
 }
 
-fn kernel_alloc_ptr<T>() -> *mut T {
-    kernel_alloc(Layout::new::<T>()).unwrap().as_mut_ptr()
-}
+#[allow(dead_code)]
+mod tests {
+    use super::*;
+    use crate::{memory::kernel_alloc, serial_print, serial_println};
+    use core::alloc::Layout;
 
-#[test_case]
-fn test_rbtree_insertion() {
-    let mut rng = fastrand::Rng::with_seed(42);
-    for _ in 0..10 {
-        let mut tree: RbTree<i32> = RbTree { head: null_mut() };
-        for _ in 0..1000 {
-            let node: *mut RbNode<i32> = kernel_alloc_ptr();
-            unsafe { (*node).value = rng.i32(0..100) };
-            tree.insert(node);
-            tree_check(tree.head, null_mut(), None, None);
+    fn print_tree<T: core::fmt::Debug, V: core::fmt::Debug>(node: *mut RbNode<T, V>, depth: i32) {
+        unsafe {
+            for _ in 0..depth {
+                serial_print!("+");
+            }
+            if color(node) == Red {
+                serial_print!("R ");
+            } else {
+                serial_print!("B ");
+            }
+            if node.is_null() {
+                serial_println!("nil");
+            } else {
+                serial_println!("{:?} [{:?}]", (*node).value, (*node).augment);
+                print_tree((*node).left, depth + 1);
+                print_tree((*node).right, depth + 1);
+            }
         }
     }
-}
 
-#[test_case]
-fn test_rbtree_deletions() {
-    let mut rng = fastrand::Rng::with_seed(42);
-    for _ in 0..10 {
-        let mut tree: RbTree<i32> = RbTree { head: null_mut() };
-        for _ in 0..1000 {
-            let node: *mut RbNode<i32> = kernel_alloc_ptr();
-            unsafe { (*node).value = rng.i32(0..100) };
-            tree.insert(node);
+    pub(super) fn tree_check<T: Ord, V: Augment<T> + Eq + core::fmt::Debug>(
+        node: *mut RbNode<T, V>,
+        parent: *mut RbNode<T, V>,
+        min: Option<&T>,
+        max: Option<&T>,
+    ) -> (u32, V) {
+        unsafe {
+            if node.is_null() {
+                return (1, V::default());
+            }
+            assert_eq!((*node).parent, parent);
+            assert!(color(node) == Black || color((*node).left) == Black);
+            assert!(color(node) == Black || color((*node).right) == Black);
+            if let Some(min) = min {
+                assert!((*node).value >= *min);
+            }
+            if let Some(max) = max {
+                assert!((*node).value <= *max);
+            }
+            let (left_depth, left_augment) =
+                tree_check((*node).left, node, min, Some(&(*node).value));
+            let (right_depth, right_augment) =
+                tree_check((*node).right, node, Some(&(*node).value), max);
+            assert_eq!(left_depth, right_depth);
+            let augment = V::augment(&(*node).value, &left_augment, &right_augment);
+            assert_eq!(augment, (*node).augment);
+            (left_depth + ((color(node) == Black) as u32), augment)
         }
-        while !tree.head.is_null() {
-            let node = pick_random(&mut rng, tree.head);
-            tree.remove(node);
-            tree_check(tree.head, null_mut(), None, None);
+    }
+
+    fn pick_random<T, V>(rng: &mut fastrand::Rng, node: *mut RbNode<T, V>) -> *mut RbNode<T, V> {
+        unsafe {
+            loop {
+                match rng.i32(0..3) {
+                    0 => return node,
+                    1 => {
+                        if !(*node).left.is_null() {
+                            return pick_random(rng, (*node).left);
+                        }
+                    }
+                    2 => {
+                        if !(*node).right.is_null() {
+                            return pick_random(rng, (*node).right);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn kernel_alloc_ptr<T>() -> *mut T {
+        kernel_alloc(Layout::new::<T>()).unwrap().as_mut_ptr()
+    }
+
+    #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
+    struct Sum(i32);
+
+    impl Augment<i32> for Sum {
+        fn augment(node: &i32, left: &Self, right: &Self) -> Self {
+            Sum(*node + left.0 + right.0)
+        }
+    }
+
+    #[test_case]
+    #[cfg(nope)]
+    fn test_rbtree_insertion() {
+        let mut rng = fastrand::Rng::with_seed(42);
+        for _ in 0..10 {
+            let mut tree: RbTree<i32, Sum> = RbTree { head: null_mut() };
+            for _ in 0..1000 {
+                let node: *mut RbNode<i32, Sum> = kernel_alloc_ptr();
+                unsafe { (*node).value = rng.i32(0..100) };
+                tree.insert(node);
+                //print_tree(tree.head, 0);
+                //serial_println!("---");
+                tree_check(tree.head, null_mut(), None, None);
+            }
+        }
+    }
+
+    #[test_case]
+    #[cfg(nope)]
+    fn test_rbtree_deletions() {
+        let mut rng = fastrand::Rng::with_seed(42);
+        for _ in 0..10 {
+            let mut tree: RbTree<i32, Sum> = RbTree { head: null_mut() };
+            for _ in 0..1000 {
+                let node: *mut RbNode<i32, Sum> = kernel_alloc_ptr();
+                unsafe { (*node).value = rng.i32(0..100) };
+                tree.insert(node);
+            }
+            while !tree.head.is_null() {
+                let node = pick_random(&mut rng, tree.head);
+                tree.remove(node);
+                tree_check(tree.head, null_mut(), None, None);
+            }
         }
     }
 }
