@@ -1,14 +1,10 @@
 use core::{alloc::Layout, ops::Range};
 
-use alloc::vec::Vec;
 use x86_64::VirtAddr;
 
-use crate::{
-    memory::{
-        FRAME_SIZE, kernel_alloc,
-        rbtree::{Augment, RbNode, RbTree},
-    },
-    serial_print, serial_println,
+use crate::memory::{
+    FRAME_SIZE, kernel_alloc,
+    rbtree::{Augment, RbNode, RbTree},
 };
 
 const VIRTUAL_ALLOC_START: u64 = 0xFFFF_A000_0000_0000;
@@ -146,32 +142,35 @@ impl VirtualAlloc {
 
 #[test_case]
 fn test_virtual_alloc() {
-    let mut valloc = VirtualAlloc::new();
-    let mut allocations = Vec::new();
+    use alloc::vec::Vec;
+    
     let mut rng = fastrand::Rng::with_seed(42);
-    for _ in 0..1000 {
-        if allocations.is_empty() || rng.u32(0..2) == 0 {
-            let size = rng.usize(1..=100) * FRAME_SIZE;
-            serial_print!("alloc {:x} = ", size);
-            let layout = Layout::from_size_align(size, FRAME_SIZE).unwrap();
-            let addr = valloc.alloc(layout).expect("alloc failed");
-            allocations.push(addr);
-            serial_print!("{:?}\n", addr);
-            
-        } else {
-            let i = rng.usize(0..allocations.len());
-            let v = allocations.swap_remove(i);
-            serial_println!("free({:?}\n", v);
-            unsafe { valloc.free(v) };
-        }
+    for _ in 0..10 {
+        let mut valloc = VirtualAlloc::new();
+        let mut allocations = Vec::new();
+        for _ in 0..1000 {
+            if allocations.is_empty() || rng.u32(0..2) == 0 {
+                let size = rng.usize(1..=100) * FRAME_SIZE;
+                //serial_print!("alloc {:x} = ", size);
+                let layout = Layout::from_size_align(size, FRAME_SIZE).unwrap();
+                let addr = valloc.alloc(layout).expect("alloc failed");
+                allocations.push(addr);
+                //serial_print!("{:?}\n", addr);
+            } else {
+                let i = rng.usize(0..allocations.len());
+                let v = allocations.swap_remove(i);
+                //serial_println!("free({:?}\n", v);
+                unsafe { valloc.free(v) };
+            }
 
-        valloc.vmaps.check();
-        let mut right_bound = VIRTUAL_ALLOC_START;
-        for span in valloc.vmaps.iter() {
-            assert!(span.value().start >= right_bound);
-            serial_println!("{:?} {:?}  : {:x}..{:x} [{:8x}]   {:x}..{:x} [{:x}]", span as *const RbNode<_, _>, span.parent().map(|x| x as *const _), span.value().start, span.value().end, span.value().start - right_bound, span.augment().min_addr, span.augment().max_addr, span.augment().max_gap);
-            right_bound = span.value().end;
+            valloc.vmaps.check();
+            let mut right_bound = VIRTUAL_ALLOC_START;
+            for span in valloc.vmaps.iter() {
+                assert!(span.value().start >= right_bound);
+                //serial_println!("{:?} {:?}  : {:x}..{:x} [{:8x}]   {:x}..{:x} [{:x}]", span as *const RbNode<_, _>, span.parent().map(|x| x as *const _), span.value().start, span.value().end, span.value().start - right_bound, span.augment().min_addr, span.augment().max_addr, span.augment().max_gap);
+                right_bound = span.value().end;
+            }
+            assert!(right_bound <= VIRTUAL_ALLOC_END);
         }
-        assert!(right_bound <= VIRTUAL_ALLOC_END);
     }
 }

@@ -60,7 +60,7 @@ pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
     } else if effective_size <= SLUB_MAX { // equivalent to size <= SLUB_MAX && align <= SLUB_MAX
         SLUB_ALLOCATOR.lock().alloc(layout)
     } else if effective_size <= BUDDY_MAX {
-        let order = clog2(effective_size) - FRAME_SHIFT;
+        let order = clog2(effective_size).saturating_sub(FRAME_SHIFT);
         BUDDY_ALLOCATOR.lock().alloc(order).map(phys_to_virt)
     } else {
         None

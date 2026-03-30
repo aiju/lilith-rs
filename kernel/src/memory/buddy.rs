@@ -154,6 +154,7 @@ impl BuddyAllocator {
             }
             order -= 1;
         }
+        unsafe { (*fi.u.get()).buddy_list.order = order as u8 };
     }
     pub fn alloc(&mut self, order: usize) -> Option<PhysAddr> {
         assert!(order <= MAX_ORDER);

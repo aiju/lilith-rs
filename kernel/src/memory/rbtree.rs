@@ -17,8 +17,6 @@ enum Direction {
 }
 use Direction::*;
 
-use crate::serial_println;
-
 impl core::ops::Not for Direction {
     type Output = Direction;
 
@@ -42,6 +40,7 @@ impl<T> Augment<T> for () {
 
 pub struct RbNode<T, V> {
     color: Color,
+    dirty: bool,
     parent: *mut RbNode<T, V>,
     left: *mut RbNode<T, V>,
     right: *mut RbNode<T, V>,
@@ -53,11 +52,21 @@ impl<T, V: Default> RbNode<T, V> {
     pub fn new(value: T) -> Self {
         RbNode {
             color: Red,
+            dirty: false,
             parent: null_mut(),
             left: null_mut(),
             right: null_mut(),
             value,
             augment: V::default(),
+        }
+    }
+}
+
+fn mark_dirty<T, V>(mut node: *mut RbNode<T, V>) {
+    unsafe {
+        while !node.is_null() && !(*node).dirty {
+            (*node).dirty = true;
+            node = (*node).parent;
         }
     }
 }
@@ -84,13 +93,17 @@ impl<T, V> RbNode<T, V> {
             Right => self.right,
         }
     }
+
     fn set_child(&mut self, dir: Direction, value: *mut RbNode<T, V>) {
         match dir {
             Left => self.left = value,
             Right => self.right = value,
         }
-        if !value.is_null() {
-            unsafe { (*value).parent = self };
+        unsafe {
+            mark_dirty(self);
+            if !value.is_null() {
+                (*value).parent = self;
+            }
         }
     }
     fn child_dir(&self, child: *mut RbNode<T, V>) -> Direction {
@@ -128,6 +141,10 @@ pub struct RbTree<T, V> {
 
 fn color<T, V>(node: *mut RbNode<T, V>) -> Color {
     unsafe { if node.is_null() { Black } else { (*node).color } }
+}
+
+fn is_dirty<T, V>(node: *mut RbNode<T, V>) -> bool {
+    unsafe { if node.is_null() { false } else { (*node).dirty } }
 }
 
 fn place<T: Ord, V>(head: *mut *mut RbNode<T, V>, node: *mut RbNode<T, V>) {
@@ -206,7 +223,6 @@ where
         node
     }
     fn update_augment(&mut self, node: *mut RbNode<T, V>) {
-        serial_println!("update_augment {:?}", node);
         unsafe {
             if node.is_null() {
                 return;
@@ -224,10 +240,26 @@ where
             (*node).augment = V::augment(&(*node).value, left, right);
         }
     }
-    fn update_augment_up(&mut self, mut node: *mut RbNode<T, V>) {
-        while node != null_mut() {
-            self.update_augment(node);
-            node = unsafe { (*node).parent };
+    fn update_augments(&mut self) {
+        unsafe {
+            let mut node = self.head;
+            if !is_dirty(node) {
+                return;
+            }
+            loop {
+                if is_dirty((*node).left) {
+                    node = (*node).left;
+                } else if is_dirty((*node).right) {
+                    node = (*node).right;
+                } else {
+                    self.update_augment(node);
+                    (*node).dirty = false;
+                    node = (*node).parent;
+                    if node.is_null() {
+                        return;
+                    }
+                }
+            }
         }
     }
     fn replace_node(&mut self, node: *mut RbNode<T, V>, replacement: *mut RbNode<T, V>) {
@@ -291,15 +323,12 @@ where
     pub fn insert(&mut self, node: *mut RbNode<T, V>) {
         unsafe {
             place(&raw mut self.head, node);
+            mark_dirty(node);
             let w_node = self.recolor(node);
             if color((*w_node).parent) == Red {
-                let parent = (*w_node).parent;
-                let grandparent = (*w_node).grandparent();
                 self.rotate(w_node);
-                self.update_augment(grandparent);
-                self.update_augment(parent);
             }
-            self.update_augment_up(node);
+            self.update_augments();
         }
     }
     // removes the node, retaining the correct order
@@ -334,7 +363,6 @@ where
                     (*succ).set_child(Left, (*node).left);
                     (*succ).set_child(Right, (*node).right);
                     core::mem::swap(&mut (*node).color, &mut (*succ).color);
-                    self.update_augment_up(fixup_parent);
                     (fixup_parent, replacement, (*node).color)
                 }
             }
@@ -350,8 +378,6 @@ where
                     self.replace_node(parent, sibling);
                     (*sibling).set_child(deficit_side, parent);
                     (*parent).set_child(!deficit_side, sibling_child);
-                    self.update_augment(parent);
-                    self.update_augment(sibling);
                     core::mem::swap(&mut (*sibling).color, &mut (*parent).color);
                     sibling = sibling_child;
                 }
@@ -381,8 +407,6 @@ where
                     (*parent).set_child(!deficit_side, inner_child);
                     (*inner_child).set_child(!deficit_side, sibling);
                     (*sibling).set_child(deficit_side, grand_child);
-                    self.update_augment(sibling);
-                    self.update_augment(inner_child);
                     core::mem::swap(&mut (*sibling).color, &mut (*inner_child).color);
                     sibling = inner_child;
                 }
@@ -392,8 +416,6 @@ where
                 self.replace_node(parent, sibling);
                 (*sibling).set_child(deficit_side, parent);
                 (*parent).set_child(!deficit_side, inner_child);
-                self.update_augment(parent);
-                self.update_augment(sibling);
                 (*sibling).color = (*parent).color;
                 (*parent).color = Black;
                 (*outer_child).color = Black;
@@ -420,7 +442,7 @@ where
                 };
                 self.remove_fixup(fixup_parent, deficit_side);
             }
-            self.update_augment_up(fixup_parent);
+            self.update_augments();
         }
     }
 }
@@ -600,6 +622,8 @@ mod tests {
             while !tree.head.is_null() {
                 let node = pick_random(&mut rng, tree.head);
                 tree.remove(node);
+                //print_tree(tree.head, 0);
+                //serial_println!("---");
                 tree_check(tree.head, null_mut(), None, None);
             }
         }
