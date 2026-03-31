@@ -1,4 +1,5 @@
 use core::{
+    cmp::Ordering,
     marker::PhantomData,
     ptr::{null, null_mut},
 };
@@ -28,50 +29,48 @@ impl core::ops::Not for Direction {
     }
 }
 
-pub trait Augment<T>: Default {
-    fn augment(node: &T, left: &Self, right: &Self) -> Self;
+pub trait Augment<T>
+where
+    Self: Sized,
+{
+    fn augment(node: &T, left: &Option<Self>, right: &Option<Self>) -> Self;
 }
 
 impl<T> Augment<T> for () {
-    fn augment(_node: &T, _left: &Self, _right: &Self) -> Self {
+    fn augment(_node: &T, _left: &Option<Self>, _right: &Option<Self>) -> Self {
         ()
     }
 }
 
 pub struct RbNode<T, V> {
     color: Color,
-    dirty: bool,
     parent: *mut RbNode<T, V>,
     left: *mut RbNode<T, V>,
     right: *mut RbNode<T, V>,
     value: T,
-    augment: V,
-}
-
-impl<T, V: Default> RbNode<T, V> {
-    pub fn new(value: T) -> Self {
-        RbNode {
-            color: Red,
-            dirty: false,
-            parent: null_mut(),
-            left: null_mut(),
-            right: null_mut(),
-            value,
-            augment: V::default(),
-        }
-    }
+    augment: Option<V>,
 }
 
 fn mark_dirty<T, V>(mut node: *mut RbNode<T, V>) {
     unsafe {
-        while !node.is_null() && !(*node).dirty {
-            (*node).dirty = true;
+        while !node.is_null() && !(*node).augment.is_none() {
+            (*node).augment.take();
             node = (*node).parent;
         }
     }
 }
 
 impl<T, V> RbNode<T, V> {
+    pub fn new(value: T) -> Self {
+        RbNode {
+            color: Red,
+            parent: null_mut(),
+            left: null_mut(),
+            right: null_mut(),
+            value,
+            augment: None,
+        }
+    }
     pub fn left(&self) -> Option<&RbNode<T, V>> {
         unsafe { self.left.as_ref() }
     }
@@ -85,7 +84,9 @@ impl<T, V> RbNode<T, V> {
         &self.value
     }
     pub fn augment(&self) -> &V {
-        &self.augment
+        self.augment
+            .as_ref()
+            .expect("no augment value -- can't happen")
     }
     fn child(&self, dir: Direction) -> *mut RbNode<T, V> {
         match dir {
@@ -144,10 +145,20 @@ fn color<T, V>(node: *mut RbNode<T, V>) -> Color {
 }
 
 fn is_dirty<T, V>(node: *mut RbNode<T, V>) -> bool {
-    unsafe { if node.is_null() { false } else { (*node).dirty } }
+    unsafe {
+        if node.is_null() {
+            false
+        } else {
+            (*node).augment.is_none()
+        }
+    }
 }
 
-fn place<T: Ord, V>(head: *mut *mut RbNode<T, V>, node: *mut RbNode<T, V>) {
+fn place<T, V>(
+    head: *mut *mut RbNode<T, V>,
+    node: *mut RbNode<T, V>,
+    cmp: impl Fn(&T, &T) -> Ordering,
+) {
     unsafe {
         (*node).color = Red;
         (*node).left = null_mut();
@@ -157,7 +168,7 @@ fn place<T: Ord, V>(head: *mut *mut RbNode<T, V>, node: *mut RbNode<T, V>) {
         let mut link = head;
         while !(*link).is_null() {
             parent = *link;
-            if (*node).value <= (*parent).value {
+            if cmp(&(*node).value, &(*parent).value).is_le() {
                 link = &raw mut (*parent).left;
             } else {
                 link = &raw mut (*parent).right;
@@ -189,7 +200,6 @@ impl<T, V> RbTree<T, V> {
 
 impl<T, V> RbTree<T, V>
 where
-    T: Ord,
     V: Augment<T>,
 {
     fn recolor(&mut self, mut node: *mut RbNode<T, V>) -> *mut RbNode<T, V> {
@@ -222,22 +232,19 @@ where
         // node is red, either parent or uncle is black
         node
     }
-    fn update_augment(&mut self, node: *mut RbNode<T, V>) {
+    fn calculate_augment(&mut self, node: *mut RbNode<T, V>) {
         unsafe {
-            if node.is_null() {
-                return;
-            }
             let left = if (*node).left.is_null() {
-                &V::default()
+                &None
             } else {
                 &(*(*node).left).augment
             };
             let right = if (*node).right.is_null() {
-                &V::default()
+                &None
             } else {
                 &(*(*node).right).augment
             };
-            (*node).augment = V::augment(&(*node).value, left, right);
+            (*node).augment = Some(V::augment(&(*node).value, left, right));
         }
     }
     fn update_augments(&mut self) {
@@ -252,8 +259,7 @@ where
                 } else if is_dirty((*node).right) {
                     node = (*node).right;
                 } else {
-                    self.update_augment(node);
-                    (*node).dirty = false;
+                    self.calculate_augment(node);
                     node = (*node).parent;
                     if node.is_null() {
                         return;
@@ -304,26 +310,23 @@ where
             (*grandparent).color = Red;
         }
     }
-    pub fn find(
-        &self,
-        mut eval: impl FnMut(&T, &V) -> core::cmp::Ordering,
-    ) -> Option<*mut RbNode<T, V>> {
+    pub fn find(&self, mut eval: impl FnMut(&T, &V) -> Ordering) -> Option<*mut RbNode<T, V>> {
         unsafe {
             let mut node = self.head;
             while !node.is_null() {
-                match eval(&(*node).value, &(*node).augment) {
-                    core::cmp::Ordering::Greater => node = (*node).left,
-                    core::cmp::Ordering::Equal => return Some(node),
-                    core::cmp::Ordering::Less => node = (*node).right,
+                match eval(&(*node).value, (*node).augment()) {
+                    Ordering::Greater => node = (*node).left,
+                    Ordering::Equal => return Some(node),
+                    Ordering::Less => node = (*node).right,
                 }
             }
             None
         }
     }
-    pub fn insert(&mut self, node: *mut RbNode<T, V>) {
+    pub fn insert(&mut self, node: *mut RbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
         unsafe {
-            place(&raw mut self.head, node);
-            mark_dirty(node);
+            place(&raw mut self.head, node, cmp);
+            mark_dirty((*node).parent);
             let w_node = self.recolor(node);
             if color((*w_node).parent) == Red {
                 self.rotate(w_node);
@@ -447,9 +450,9 @@ where
     }
 }
 
-impl<T: Ord, V: Augment<T> + Eq + core::fmt::Debug> RbTree<T, V> {
-    pub fn check(&self) {
-        crate::memory::rbtree::tests::tree_check(self.head, null_mut(), None, None);
+impl<T, V: Augment<T> + Eq + core::fmt::Debug> RbTree<T, V> {
+    pub fn check(&self, cmp: impl Fn(&T, &T) -> Ordering) {
+        crate::memory::rbtree::tests::tree_check(self.head, null_mut(), None, None, &cmp);
     }
 }
 
@@ -527,33 +530,34 @@ mod tests {
         }
     }
 
-    pub(super) fn tree_check<T: Ord, V: Augment<T> + Eq + core::fmt::Debug>(
+    pub(super) fn tree_check<T, V: Augment<T> + Eq + core::fmt::Debug>(
         node: *mut RbNode<T, V>,
         parent: *mut RbNode<T, V>,
         min: Option<&T>,
         max: Option<&T>,
-    ) -> (u32, V) {
+        cmp: &impl Fn(&T, &T) -> Ordering,
+    ) -> (u32, Option<V>) {
         unsafe {
             if node.is_null() {
-                return (1, V::default());
+                return (1, None);
             }
             assert_eq!((*node).parent, parent);
             assert!(color(node) == Black || color((*node).left) == Black);
             assert!(color(node) == Black || color((*node).right) == Black);
             if let Some(min) = min {
-                assert!((*node).value >= *min);
+                assert!(cmp(&(*node).value, min).is_ge())
             }
             if let Some(max) = max {
-                assert!((*node).value <= *max);
+                assert!(cmp(&(*node).value, max).is_le())
             }
             let (left_depth, left_augment) =
-                tree_check((*node).left, node, min, Some(&(*node).value));
+                tree_check((*node).left, node, min, Some(&(*node).value), cmp);
             let (right_depth, right_augment) =
-                tree_check((*node).right, node, Some(&(*node).value), max);
+                tree_check((*node).right, node, Some(&(*node).value), max, cmp);
             assert_eq!(left_depth, right_depth);
             let augment = V::augment(&(*node).value, &left_augment, &right_augment);
-            assert_eq!(augment, (*node).augment);
-            (left_depth + ((color(node) == Black) as u32), augment)
+            assert_eq!(Some(&augment), (*node).augment.as_ref());
+            (left_depth + ((color(node) == Black) as u32), Some(augment))
         }
     }
 
@@ -586,8 +590,8 @@ mod tests {
     struct Sum(i32);
 
     impl Augment<i32> for Sum {
-        fn augment(node: &i32, left: &Self, right: &Self) -> Self {
-            Sum(*node + left.0 + right.0)
+        fn augment(node: &i32, left: &Option<Self>, right: &Option<Self>) -> Self {
+            Sum(*node + left.unwrap_or_default().0 + right.unwrap_or_default().0)
         }
     }
 

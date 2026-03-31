@@ -4,10 +4,10 @@ use x86_64::{PhysAddr, VirtAddr};
 mod address_space;
 mod bootstrap;
 mod buddy;
-mod frame_info;
-mod slub;
 mod debug_info;
+mod frame_info;
 mod rbtree;
+mod slub;
 mod virtual_alloc;
 
 pub use address_space::AddressSpace;
@@ -57,7 +57,8 @@ pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
     let effective_size = layout.size().max(layout.align());
     if layout.size() == 0 {
         Some(ZST_SENTINEL)
-    } else if effective_size <= SLUB_MAX { // equivalent to size <= SLUB_MAX && align <= SLUB_MAX
+    } else if effective_size <= SLUB_MAX {
+        // equivalent to size <= SLUB_MAX && align <= SLUB_MAX
         SLUB_ALLOCATOR.lock().alloc(layout)
     } else if effective_size <= BUDDY_MAX {
         let order = clog2(effective_size).saturating_sub(FRAME_SHIFT);
@@ -65,6 +66,10 @@ pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
     } else {
         None
     }
+}
+
+pub fn kernel_alloc_ptr<T>() -> Option<*mut T> {
+    kernel_alloc(Layout::new::<T>()).map(|a| a.as_mut_ptr())
 }
 
 pub unsafe fn kernel_free(addr: VirtAddr) {

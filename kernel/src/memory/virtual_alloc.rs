@@ -1,87 +1,81 @@
-use core::{alloc::Layout, ops::Range};
+use core::{
+    alloc::Layout,
+    ops::{Add, Range, Sub},
+};
 
 use x86_64::VirtAddr;
 
 use crate::memory::{
-    FRAME_SIZE, kernel_alloc,
+    FRAME_SIZE, kernel_alloc, kernel_alloc_ptr, kernel_free,
     rbtree::{Augment, RbNode, RbTree},
 };
 
 const VIRTUAL_ALLOC_START: u64 = 0xFFFF_A000_0000_0000;
 const VIRTUAL_ALLOC_END: u64 = 0xFFFF_B000_0000_0000;
 
-#[derive(PartialEq, Eq, Debug)]
-struct VMap {
-    start: u64,
-    end: u64,
-}
-
-impl PartialOrd for VMap {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some((*self).cmp(other))
-    }
-}
-
-impl Ord for VMap {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        (self.start).cmp(&other.start)
-    }
+struct Span<A, V> {
+    start: A,
+    end: A,
+    value: V,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct MaxGap {
-    min_addr: u64,
-    max_addr: u64,
-    max_gap: u64,
+struct MaxGap<A> {
+    min_addr: A,
+    max_addr: A,
+    max_gap: A,
 }
 
-impl Default for MaxGap {
-    fn default() -> Self {
-        Self {
-            min_addr: VIRTUAL_ALLOC_END,
-            max_addr: VIRTUAL_ALLOC_START,
-            max_gap: 0,
+// should maybe use a Zero trait instead of Default in augment?
+trait Address: Ord + Add<Output = Self> + Sub<Output = Self> + Default + Copy {}
+impl<A: Ord + Add<Output = Self> + Sub<Output = Self> + Default + Copy> Address for A {}
+
+impl<A: Address, V> Augment<Span<A, V>> for MaxGap<A> {
+    fn augment(node: &Span<A, V>, left: &Option<Self>, right: &Option<Self>) -> Self {
+        let mut max_gap = A::default();
+        let mut min_addr = node.start;
+        let mut max_addr = node.end;
+        if let Some(left) = left {
+            max_gap = max_gap.max(left.max_gap);
+            max_gap = max_gap.max(node.start - left.max_addr);
+            min_addr = min_addr.min(left.min_addr);
+            debug_assert!(left.max_addr <= node.start);
         }
-    }
-}
-
-impl Augment<VMap> for MaxGap {
-    fn augment(node: &VMap, left: &Self, right: &Self) -> Self {
-        let gap1 = if left.min_addr <= left.max_addr {
-            node.start - left.max_addr
-        } else {
-            0
-        };
-        let gap2 = if right.min_addr <= right.max_addr {
-            right.min_addr - node.end
-        } else {
-            0
-        };
-        let max_gap = gap1.max(gap2).max(left.max_gap).max(right.max_gap);
+        if let Some(right) = right {
+            max_gap = max_gap.max(right.max_gap);
+            max_gap = max_gap.max(right.min_addr - node.end);
+            max_addr = max_addr.max(right.max_addr);
+            debug_assert!(node.end <= right.min_addr);
+        }
         MaxGap {
-            min_addr: left.min_addr.min(node.start).min(right.min_addr),
-            max_addr: left.max_addr.max(node.end).max(right.max_addr),
+            min_addr,
+            max_addr,
             max_gap,
         }
     }
 }
 
-struct VirtualAlloc {
-    vmaps: RbTree<VMap, MaxGap>,
+struct SpanAlloc<A, V> {
+    spans: RbTree<Span<A, V>, MaxGap<A>>,
+    range: Range<A>,
 }
 
-impl VirtualAlloc {
-    const fn new() -> Self {
-        VirtualAlloc {
-            vmaps: RbTree::new(),
+impl<A, V> SpanAlloc<A, V> {
+    const fn new(range: Range<A>) -> Self {
+        SpanAlloc {
+            spans: RbTree::new(),
+            range,
         }
     }
-    fn find_gap(&self, size: u64) -> Option<Range<u64>> {
-        let Some(mut node) = self.vmaps.head() else {
-            return Some(VIRTUAL_ALLOC_START..VIRTUAL_ALLOC_END);
+}
+
+impl<A: Address, V> SpanAlloc<A, V> {
+    fn find_gap(&self, size: A) -> Option<Range<A>> {
+        let Some(mut node) = self.spans.head() else {
+            return Some(self.range.clone());
         };
-        let mut tree_min = VIRTUAL_ALLOC_START;
-        let mut tree_max = VIRTUAL_ALLOC_END;
+        let mut tree_min = self.range.start;
+        let mut tree_max = self.range.end;
         loop {
             let left = node.left().map(|n| n.augment());
             let right = node.right().map(|n| n.augment());
@@ -118,42 +112,48 @@ impl VirtualAlloc {
             return None;
         }
     }
-    pub fn alloc(&mut self, layout: Layout) -> Option<VirtAddr> {
-        let layout = layout.align_to(FRAME_SIZE).unwrap().pad_to_align();
-        let gap = self.find_gap(layout.size() as u64)?;
-        let vmap = VMap {
+    pub fn alloc(&mut self, size: A, value: V) -> Option<A> {
+        let gap = self.find_gap(size)?;
+        let span = Span {
             start: gap.start,
-            end: gap.start + layout.size() as u64,
+            end: gap.start + size,
+            value,
         };
-        let node: *mut RbNode<VMap, MaxGap> =
-            kernel_alloc(Layout::new::<RbNode<VMap, MaxGap>>())?.as_mut_ptr();
-        unsafe { core::ptr::write(node, RbNode::new(vmap)) };
-        self.vmaps.insert(node);
-        Some(VirtAddr::new(gap.start))
+        let node = kernel_alloc_ptr().unwrap();
+        unsafe { core::ptr::write(node, RbNode::new(span)) };
+        self.spans.insert(node, |x, y| A::cmp(&x.start, &y.start));
+        Some(gap.start)
     }
-    pub unsafe fn free(&mut self, addr: VirtAddr) {
+    pub unsafe fn free(&mut self, addr: A) {
         let node = self
-            .vmaps
-            .find(|vmap, _| vmap.start.cmp(&addr.as_u64()))
+            .spans
+            .find(|vmap, _| vmap.start.cmp(&addr))
             .expect("free with pointer not virtual_alloc'd");
-        self.vmaps.remove(node);
+        self.spans.remove(node);
+        unsafe { kernel_free(VirtAddr::from_ptr(node)) };
+    }
+}
+
+impl<A: Address + core::fmt::Debug, V> SpanAlloc<A, V> {
+    fn check(&self) {
+        self.spans.check(|x, y| A::cmp(&x.start, &y.start));
     }
 }
 
 #[test_case]
-fn test_virtual_alloc() {
+fn test_span_alloc() {
     use alloc::vec::Vec;
-    
+
     let mut rng = fastrand::Rng::with_seed(42);
+    let range = 1000000..2000000;
     for _ in 0..10 {
-        let mut valloc = VirtualAlloc::new();
+        let mut valloc = SpanAlloc::<u64, ()>::new(range.clone());
         let mut allocations = Vec::new();
         for _ in 0..1000 {
             if allocations.is_empty() || rng.u32(0..2) == 0 {
-                let size = rng.usize(1..=100) * FRAME_SIZE;
+                let size = rng.u64(1..=100);
                 //serial_print!("alloc {:x} = ", size);
-                let layout = Layout::from_size_align(size, FRAME_SIZE).unwrap();
-                let addr = valloc.alloc(layout).expect("alloc failed");
+                let addr = valloc.alloc(size, ()).expect("alloc failed");
                 allocations.push(addr);
                 //serial_print!("{:?}\n", addr);
             } else {
@@ -163,14 +163,14 @@ fn test_virtual_alloc() {
                 unsafe { valloc.free(v) };
             }
 
-            valloc.vmaps.check();
-            let mut right_bound = VIRTUAL_ALLOC_START;
-            for span in valloc.vmaps.iter() {
+            valloc.check();
+            let mut right_bound = range.start;
+            for span in valloc.spans.iter() {
                 assert!(span.value().start >= right_bound);
                 //serial_println!("{:?} {:?}  : {:x}..{:x} [{:8x}]   {:x}..{:x} [{:x}]", span as *const RbNode<_, _>, span.parent().map(|x| x as *const _), span.value().start, span.value().end, span.value().start - right_bound, span.augment().min_addr, span.augment().max_addr, span.augment().max_gap);
                 right_bound = span.value().end;
             }
-            assert!(right_bound <= VIRTUAL_ALLOC_END);
+            assert!(right_bound <= range.end);
         }
     }
 }
