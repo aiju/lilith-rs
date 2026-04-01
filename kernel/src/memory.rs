@@ -33,6 +33,13 @@ pub const BOOT_INFO: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFF_9000_0000);
 pub const FRAME_LAYOUT: Layout =
     unsafe { Layout::from_size_align_unchecked(FRAME_SIZE, FRAME_SIZE) };
 
+#[derive(Clone, Debug)]
+pub enum MemoryError {
+    OutOfMemory,
+    OutOfVirtual,
+    SizeTooBig,
+}
+
 pub fn is_user_address(virt: VirtAddr) -> bool {
     virt.as_u64() >> 48 == 0
 }
@@ -56,10 +63,10 @@ pub unsafe fn phys_to_mut<T>(phys: PhysAddr) -> &'static mut T {
 /// should satisfy any reasonable alignment
 pub const ZST_SENTINEL: VirtAddr = PHYSICAL_MEMORY_OFFSET;
 
-pub fn direct_alloc(layout: Layout) -> Option<VirtAddr> {
+pub fn direct_alloc(layout: Layout) -> Result<VirtAddr, MemoryError> {
     let effective_size = layout.size().max(layout.align());
     if layout.size() == 0 {
-        Some(ZST_SENTINEL)
+        Ok(ZST_SENTINEL)
     } else if effective_size <= SLUB_MAX {
         // equivalent to size <= SLUB_MAX && align <= SLUB_MAX
         SLUB_ALLOCATOR.lock().alloc(layout)
@@ -67,19 +74,19 @@ pub fn direct_alloc(layout: Layout) -> Option<VirtAddr> {
         let order = clog2(effective_size).saturating_sub(FRAME_SHIFT);
         BUDDY_ALLOCATOR.lock().alloc(order).map(phys_to_virt)
     } else {
-        None
+        Err(MemoryError::SizeTooBig)
     }
 }
 
-pub fn direct_alloc_ptr<T>() -> Option<*mut T> {
+pub fn direct_alloc_ptr<T>() -> Result<*mut T, MemoryError> {
     direct_alloc(Layout::new::<T>()).map(|a| a.as_mut_ptr())
 }
 
-pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
-    direct_alloc(layout).or_else(|| VIRTUAL_ALLOCATOR.lock().alloc(layout))
+pub fn kernel_alloc(layout: Layout) -> Result<VirtAddr, MemoryError> {
+    direct_alloc(layout).or_else(|_| VIRTUAL_ALLOCATOR.lock().alloc(layout))
 }
 
-pub fn alloc_frame() -> Option<PhysAddr> {
+pub fn alloc_frame() -> Result<PhysAddr, MemoryError> {
     BUDDY_ALLOCATOR.lock().alloc(0)
 }
 
@@ -121,7 +128,7 @@ static GLOBAL_ALLOC: GlobalAlloc = GlobalAlloc;
 
 unsafe impl core::alloc::GlobalAlloc for GlobalAlloc {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        if let Some(addr) = kernel_alloc(layout) {
+        if let Ok(addr) = kernel_alloc(layout) {
             addr.as_mut_ptr()
         } else {
             core::ptr::null_mut()

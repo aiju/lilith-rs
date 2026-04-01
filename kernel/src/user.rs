@@ -5,7 +5,7 @@ use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::PhysFrame};
 use xmas_elf::{ElfFile, program::SegmentData};
 
 use crate::{
-    mach::{USER_CODE_SELECTOR, mach}, memory::UserAddressSpace, println, sched::thread_stack, sync::{IrqLock, interrupt_guard}
+    mach::{USER_CODE_SELECTOR, mach}, memory::{MemoryError, UserAddressSpace}, println, sched::thread_stack, sync::{IrqLock, interrupt_guard}
 };
 
 pub const USER_STACK_BOTTOM: u64 = 0x0000_7FFF_0000_0000;
@@ -20,9 +20,9 @@ pub struct Proc {
 }
 
 impl Proc {
-    pub fn new() -> Option<Proc> {
+    pub fn new() -> Result<Proc, MemoryError> {
         let address_space = UserAddressSpace::new()?;
-        Some(Proc {
+        Ok(Proc {
             memory: IrqLock::new(ProcMemory { address_space }),
         })
     }

@@ -4,9 +4,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{
     memory::{
-        buddy::BUDDY_ALLOCATOR,
-        frame_info::{FRAME_SIZE, FrameInfo, FrameType, frame_info},
-        phys_to_virt, virt_to_phys,
+        MemoryError, buddy::BUDDY_ALLOCATOR, frame_info::{FRAME_SIZE, FrameInfo, FrameType, frame_info}, phys_to_virt, virt_to_phys
     },
     sync::{BootInit, IrqLock}, util::clog2,
 };
@@ -97,16 +95,17 @@ fn init_size_lookup() {
     unsafe { BootInit::set(&SIZE_LOOKUP, table) };
 }
 
-fn find_class(layout: Layout) -> Option<(usize, usize)> {
+fn find_class(layout: Layout) -> (usize, usize) {
     let size = layout.size();
     let align = layout.align();
+    debug_assert!(size <= SLUB_MAX && align <= SLUB_MAX);
     // since sizes are arranged geometrically we look up by clog2
     // with the current list of sizes guaranteed to terminate in at most 2 iterations
     // unless you ask for a large alignment on a small allocation in which case we may have to iterate until the end
     let mut index = SIZE_LOOKUP[clog2(size)];
     loop {
         if size <= SIZE_CLASSES[index] && align <= SIZE_CLASSES[index].isolate_lowest_one() {
-            return Some((index, SIZE_CLASSES[index]));
+            return (index, SIZE_CLASSES[index]);
         }
         index += 1;
     }
@@ -158,9 +157,9 @@ impl SlabCache {
         }
     }
 
-    fn grab_slab(&mut self) -> Option<&'static FrameInfo> {
+    fn grab_slab(&mut self) -> Result<&'static FrameInfo, MemoryError> {
         if self.list.next != &raw mut self.list {
-            unsafe { Some(SlabList::frame_info(self.list.next)) }
+            unsafe { Ok(SlabList::frame_info(self.list.next)) }
         } else {
             let addr = BUDDY_ALLOCATOR.lock().alloc(self.slab_order as usize)?;
             let fi = frame_info(addr);
@@ -169,7 +168,7 @@ impl SlabCache {
                 self.list.insert(&raw mut (*fi.u.get()).slab_list);
                 fi.set_ty(FrameType::Slab);
             }
-            Some(fi)
+            Ok(fi)
         }
     }
 
@@ -189,8 +188,8 @@ impl SlabCache {
 }
 
 impl SlubAllocator {
-    pub fn alloc(&mut self, layout: Layout) -> Option<VirtAddr> {
-        let (index, _) = find_class(layout)?;
+    pub fn alloc(&mut self, layout: Layout) -> Result<VirtAddr, MemoryError> {
+        let (index, _) = find_class(layout);
         let fi = self.slabs[index].grab_slab()?;
         let sl = unsafe { &mut (*fi.u.get()).slab_list };
         let p = sl.free_list;
@@ -199,7 +198,7 @@ impl SlubAllocator {
         if sl.free_count == 0 {
             sl.unlink();
         }
-        Some(VirtAddr::from_ptr(p))
+        Ok(VirtAddr::from_ptr(p))
     }
     pub unsafe fn free(&mut self, object: VirtAddr) {
         let phys = virt_to_phys(object).expect("address passed to free not in direct map");

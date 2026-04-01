@@ -7,7 +7,7 @@ use x86_64::VirtAddr;
 
 use crate::{
     memory::{
-        FRAME_SIZE,
+        FRAME_SIZE, MemoryError,
         address_space::KERNEL_ADDRESS_SPACE,
         direct_alloc_ptr, kernel_free,
         rbtree::{Augment, RbNode, RbTree},
@@ -60,9 +60,15 @@ impl<A: Address, V> Augment<Span<A, V>> for MaxGap<A> {
     }
 }
 
-struct SpanAlloc<A, V> {
+pub struct SpanAlloc<A, V> {
     spans: RbTree<Span<A, V>, MaxGap<A>>,
     range: Range<A>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SpanError {
+    Memory(MemoryError),
+    Exhausted,
 }
 
 impl<A, V> SpanAlloc<A, V> {
@@ -117,8 +123,8 @@ impl<A: Address, V> SpanAlloc<A, V> {
             return None;
         }
     }
-    pub fn alloc(&mut self, size: A, value: V) -> Option<Range<A>> {
-        let gap = self.find_gap(size)?;
+    pub fn alloc(&mut self, size: A, value: V) -> Result<Range<A>, SpanError> {
+        let gap = self.find_gap(size).ok_or(SpanError::Exhausted)?;
         let range = gap.start..gap.start + size;
         let span = Span {
             start: range.start,
@@ -126,10 +132,10 @@ impl<A: Address, V> SpanAlloc<A, V> {
             value,
         };
         // TODO: maybe alloc + write should be a utility function ?
-        let node = direct_alloc_ptr()?;
+        let node = direct_alloc_ptr().map_err(SpanError::Memory)?;
         unsafe { core::ptr::write(node, RbNode::new(span)) };
         unsafe { self.spans.insert(node, |x, y| A::cmp(&x.start, &y.start)) };
-        Some(range)
+        Ok(range)
     }
     pub fn span_containing(&self, addr: A) -> Option<&V> {
         self.spans
@@ -171,19 +177,28 @@ pub struct VirtualAllocator {
 pub static VIRTUAL_ALLOCATOR: IrqLock<VirtualAllocator> = IrqLock::new(VirtualAllocator::new());
 
 impl VirtualAllocator {
+    fn err_map(err: SpanError) -> MemoryError {
+        match err {
+            SpanError::Memory(memory_error) => memory_error,
+            SpanError::Exhausted => MemoryError::OutOfVirtual,
+        }
+    }
     pub const fn new() -> Self {
         VirtualAllocator {
             spans: SpanAlloc::new(VIRTUAL_ALLOCATOR_START.as_u64()..VIRTUAL_ALLOCATOR_END.as_u64()),
         }
     }
-    pub fn alloc(&mut self, layout: Layout) -> Option<VirtAddr> {
+    pub fn alloc(&mut self, layout: Layout) -> Result<VirtAddr, MemoryError> {
         let layout = layout.align_to(FRAME_SIZE).unwrap().pad_to_align();
-        let range = self.spans.alloc(layout.size() as u64, ())?;
+        let range = self
+            .spans
+            .alloc(layout.size() as u64, ())
+            .map_err(Self::err_map)?;
         let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
         for addr in range.clone().step_by(FRAME_SIZE) {
             unsafe { kernel_as.map_new_page(VirtAddr::new_unsafe(addr)) };
         }
-        Some(VirtAddr::new(range.start))
+        Ok(VirtAddr::new(range.start))
     }
     pub unsafe fn free(&mut self, addr: VirtAddr) {
         let (range, _) = unsafe { self.spans.free(addr.as_u64()) };

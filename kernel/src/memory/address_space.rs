@@ -9,8 +9,7 @@ use x86_64::{
 
 use crate::{
     interrupts::IrqContext, mach::mach, memory::{
-        PHYSICAL_MEMORY_OFFSET, alloc_frame, frame_info::FRAME_SIZE, is_user_address,
-        kernel_free, phys_to_virt, virt_to_phys, zero_frame,
+        MemoryError, PHYSICAL_MEMORY_OFFSET, alloc_frame, frame_info::FRAME_SIZE, is_user_address, kernel_free, phys_to_virt, virt_to_phys, zero_frame
     }, println, sync::{BootInit, IrqLock}
 };
 
@@ -18,7 +17,7 @@ struct FrameAllocator;
 
 unsafe impl x86_64::structures::paging::FrameAllocator<Size4KiB> for FrameAllocator {
     fn allocate_frame(&mut self) -> Option<x86_64::structures::paging::PhysFrame<Size4KiB>> {
-        let frame = alloc_frame()?;
+        let frame = alloc_frame().ok()?;
         unsafe { Some(PhysFrame::from_start_address_unchecked(frame)) }
     }
 }
@@ -45,7 +44,7 @@ impl KernelAddressSpace {
     fn offset_page_table(&mut self) -> OffsetPageTable<'_> {
         unsafe { OffsetPageTable::new(&mut *self.page_table.as_mut_ptr(), PHYSICAL_MEMORY_OFFSET) }
     }
-    pub unsafe fn map_new_page(&mut self, addr: VirtAddr) -> Option<()> {
+    pub unsafe fn map_new_page(&mut self, addr: VirtAddr) -> Result<(), MemoryError> {
         unsafe {
             let phys = alloc_frame()?;
             self.offset_page_table()
@@ -57,7 +56,7 @@ impl KernelAddressSpace {
                 )
                 .unwrap()
                 .flush();
-            Some(())
+            Ok(())
         }
     }
     pub unsafe fn unmap_page(&mut self, addr: VirtAddr) {
@@ -83,7 +82,7 @@ pub struct UserAddressSpace {
 }
 
 impl UserAddressSpace {
-    pub fn new() -> Option<Self> {
+    pub fn new() -> Result<Self, MemoryError> {
         let guard = KERNEL_ADDRESS_SPACE.lock();
         let global: &PageTable = unsafe { &*(*guard).page_table.as_ptr() };
         let addr = phys_to_virt(alloc_frame()?);
@@ -94,7 +93,7 @@ impl UserAddressSpace {
         for i in 256..512 {
             new[i] = global[i].clone();
         }
-        Some(UserAddressSpace {
+        Ok(UserAddressSpace {
             page_table: addr,
             mappings: Vec::new(),
         })

@@ -3,9 +3,9 @@ use core::ops::Range;
 use x86_64::PhysAddr;
 
 use crate::{
-    memory::frame_info::{
+    memory::{MemoryError, frame_info::{
         FRAME_INFO_SHIFT, FRAME_SHIFT, FRAME_SIZE, FrameInfo, FrameType, frame_info,
-    },
+    }},
     sync::IrqLock,
 };
 
@@ -137,13 +137,13 @@ unsafe fn sort_buddies(fi: &FrameInfo, order: usize) -> (&'static FrameInfo, &'s
 }
 
 impl BuddyAllocator {
-    fn alloc_min(&mut self, order: usize) -> Option<(&'static FrameInfo, usize)> {
+    fn alloc_min(&mut self, order: usize) -> Result<(&'static FrameInfo, usize), MemoryError> {
         for o in order..=MAX_ORDER {
             if let Some(bl) = self.heads[o].pop_front() {
-                return Some((unsafe { BuddyList::frame_info(bl) }, o));
+                return Ok((unsafe { BuddyList::frame_info(bl) }, o));
             }
         }
-        None
+        Err(MemoryError::OutOfMemory)
     }
     fn split(&mut self, fi: &FrameInfo, mut order: usize, target_order: usize) {
         while order > target_order {
@@ -156,14 +156,14 @@ impl BuddyAllocator {
         }
         unsafe { (*fi.u.get()).buddy_list.order = order as u8 };
     }
-    pub fn alloc(&mut self, order: usize) -> Option<PhysAddr> {
+    pub fn alloc(&mut self, order: usize) -> Result<PhysAddr, MemoryError> {
         assert!(order <= MAX_ORDER);
 
         let (fi, o) = self.alloc_min(order)?;
         self.split(fi, o, order);
         unsafe { fi.set_ty(FrameType::BuddyAllocated) };
 
-        Some(unsafe { fi.addr() })
+        Ok(unsafe { fi.addr() })
     }
     fn merge(
         &mut self,
