@@ -1,7 +1,7 @@
 use core::{
     cmp::Ordering,
     marker::PhantomData,
-    ptr::{null, null_mut},
+    ptr::null_mut,
 };
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -604,7 +604,6 @@ mod tests {
     }
 
     #[test_case]
-    #[cfg(nope)]
     fn test_rbtree_insertion() {
         let mut rng = fastrand::Rng::with_seed(42);
         for _ in 0..10 {
@@ -612,16 +611,15 @@ mod tests {
             for _ in 0..1000 {
                 let node: *mut RbNode<i32, Sum> = kernel_alloc_ptr();
                 unsafe { (*node).value = rng.i32(0..100) };
-                tree.insert(node);
+                unsafe { tree.insert(node, Ord::cmp) };
                 //print_tree(tree.head, 0);
                 //serial_println!("---");
-                tree_check(tree.head, null_mut(), None, None);
+                tree_check(tree.head, null_mut(), None, None, &Ord::cmp);
             }
         }
     }
 
     #[test_case]
-    #[cfg(nope)]
     fn test_rbtree_deletions() {
         let mut rng = fastrand::Rng::with_seed(42);
         for _ in 0..10 {
@@ -629,14 +627,14 @@ mod tests {
             for _ in 0..1000 {
                 let node: *mut RbNode<i32, Sum> = kernel_alloc_ptr();
                 unsafe { (*node).value = rng.i32(0..100) };
-                tree.insert(node);
+                unsafe { tree.insert(node, Ord::cmp) };
             }
             while !tree.head.is_null() {
                 let node = pick_random(&mut rng, tree.head);
-                tree.remove(node);
+                unsafe { tree.remove(node) };
                 //print_tree(tree.head, 0);
                 //serial_println!("---");
-                tree_check(tree.head, null_mut(), None, None);
+                tree_check(tree.head, null_mut(), None, None, &Ord::cmp);
             }
         }
     }

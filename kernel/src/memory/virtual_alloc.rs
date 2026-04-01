@@ -32,7 +32,7 @@ struct MaxGap<A> {
 }
 
 // should maybe use a Zero trait instead of Default in augment?
-trait Address: Ord + Add<Output = Self> + Sub<Output = Self> + Default + Copy {}
+pub trait Address: Ord + Add<Output = Self> + Sub<Output = Self> + Default + Copy {}
 impl<A: Ord + Add<Output = Self> + Sub<Output = Self> + Default + Copy> Address for A {}
 
 impl<A: Address, V> Augment<Span<A, V>> for MaxGap<A> {
@@ -188,17 +188,37 @@ impl VirtualAllocator {
             spans: SpanAlloc::new(VIRTUAL_ALLOCATOR_START.as_u64()..VIRTUAL_ALLOCATOR_END.as_u64()),
         }
     }
+    fn try_map_pages(range: Range<u64>) -> Result<(), (Range<u64>, MemoryError)> {
+        let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
+        for addr in range.clone().step_by(FRAME_SIZE) {
+            unsafe {
+                kernel_as
+                    .map_new_page(VirtAddr::new_unsafe(addr))
+                    .map_err(|e| (range.start..addr, e))?
+            };
+        }
+        Ok(())
+    }
+    fn unmap_pages(range: Range<u64>) {
+        let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
+        for addr in range.step_by(FRAME_SIZE) {
+            unsafe { kernel_as.unmap_page(VirtAddr::new_unsafe(addr)) };
+        }
+    }
     pub fn alloc(&mut self, layout: Layout) -> Result<VirtAddr, MemoryError> {
         let layout = layout.align_to(FRAME_SIZE).unwrap().pad_to_align();
         let range = self
             .spans
             .alloc(layout.size() as u64, ())
             .map_err(Self::err_map)?;
-        let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
-        for addr in range.clone().step_by(FRAME_SIZE) {
-            unsafe { kernel_as.map_new_page(VirtAddr::new_unsafe(addr)) };
+        match Self::try_map_pages(range.clone()) {
+            Ok(()) => Ok(unsafe { VirtAddr::new_unsafe(range.start) }),
+            Err((done_range, err)) => {
+                Self::unmap_pages(done_range);
+                unsafe { self.spans.free(range.start) };
+                Err(err)
+            }
         }
-        Ok(VirtAddr::new(range.start))
     }
     pub unsafe fn free(&mut self, addr: VirtAddr) {
         let (range, _) = unsafe { self.spans.free(addr.as_u64()) };
