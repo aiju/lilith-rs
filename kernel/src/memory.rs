@@ -10,11 +10,14 @@ mod rbtree;
 mod slub;
 mod virtual_alloc;
 
-pub use address_space::AddressSpace;
+pub use address_space::UserAddressSpace;
 pub use address_space::page_fault_handler;
 pub use bootstrap::init;
 pub use frame_info::{FRAME_SHIFT, FRAME_SIZE};
 
+use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR;
+use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR_END;
+use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR_START;
 use crate::memory::{
     buddy::{BUDDY_ALLOCATOR, BUDDY_MAX},
     slub::{SLUB_ALLOCATOR, SLUB_MAX},
@@ -53,7 +56,7 @@ pub unsafe fn phys_to_mut<T>(phys: PhysAddr) -> &'static mut T {
 /// should satisfy any reasonable alignment
 pub const ZST_SENTINEL: VirtAddr = PHYSICAL_MEMORY_OFFSET;
 
-pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
+pub fn direct_alloc(layout: Layout) -> Option<VirtAddr> {
     let effective_size = layout.size().max(layout.align());
     if layout.size() == 0 {
         Some(ZST_SENTINEL)
@@ -68,15 +71,23 @@ pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
     }
 }
 
-pub fn kernel_alloc_ptr<T>() -> Option<*mut T> {
-    kernel_alloc(Layout::new::<T>()).map(|a| a.as_mut_ptr())
+pub fn direct_alloc_ptr<T>() -> Option<*mut T> {
+    direct_alloc(Layout::new::<T>()).map(|a| a.as_mut_ptr())
 }
 
-pub unsafe fn kernel_free(addr: VirtAddr) {
+pub fn kernel_alloc(layout: Layout) -> Option<VirtAddr> {
+    direct_alloc(layout).or_else(|| VIRTUAL_ALLOCATOR.lock().alloc(layout))
+}
+
+pub fn alloc_frame() -> Option<PhysAddr> {
+    BUDDY_ALLOCATOR.lock().alloc(0)
+}
+
+pub unsafe fn direct_free(addr: VirtAddr) {
     if addr == ZST_SENTINEL {
         return;
     }
-    let phys = virt_to_phys(addr).expect("non-direct mapped address passed to kernel_free");
+    let phys = virt_to_phys(addr).expect("non-direct mapped address passed to direct_free");
     let fi = frame_info::frame_info(phys);
     match fi.ty() {
         frame_info::FrameType::BuddyAllocated => unsafe {
@@ -84,7 +95,17 @@ pub unsafe fn kernel_free(addr: VirtAddr) {
             BUDDY_ALLOCATOR.lock().free(phys, order as usize);
         },
         frame_info::FrameType::Slab => unsafe { SLUB_ALLOCATOR.lock().free(addr) },
-        _ => panic!("invalid address passed to kernel_free"),
+        _ => panic!("invalid address passed to direct_free"),
+    }
+}
+
+pub unsafe fn kernel_free(addr: VirtAddr) {
+    if addr >= PHYSICAL_MEMORY_OFFSET && addr < PHYSICAL_MEMORY_OFFSET + PHYSICAL_MEMORY_MAX_SIZE {
+        unsafe { direct_free(addr) };
+    } else if addr >= VIRTUAL_ALLOCATOR_START && addr < VIRTUAL_ALLOCATOR_END {
+        unsafe { VIRTUAL_ALLOCATOR.lock().free(addr) }
+    } else {
+        panic!("invalid address passed to kernel_free");
     }
 }
 

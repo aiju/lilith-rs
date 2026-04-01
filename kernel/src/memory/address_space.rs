@@ -8,29 +8,66 @@ use x86_64::{
 };
 
 use crate::{
-    interrupts::IrqContext,
-    mach::mach,
-    memory::{
-        FRAME_LAYOUT, PHYSICAL_MEMORY_OFFSET, frame_info::FRAME_SIZE, is_user_address,
-        kernel_alloc, phys_to_virt, virt_to_phys, zero_frame,
-    },
-    println,
-    sync::IrqLock,
+    interrupts::IrqContext, mach::mach, memory::{
+        PHYSICAL_MEMORY_OFFSET, alloc_frame, frame_info::FRAME_SIZE, is_user_address,
+        kernel_free, phys_to_virt, virt_to_phys, zero_frame,
+    }, println, sync::{BootInit, IrqLock}
 };
-
-static GLOBAL_PAGE_TABLE: IrqLock<VirtAddr> = IrqLock::new(VirtAddr::zero());
-
-pub(super) unsafe fn set_global_page_table_address(addr: PhysAddr) {
-    *GLOBAL_PAGE_TABLE.lock() = phys_to_virt(addr);
-}
 
 struct FrameAllocator;
 
 unsafe impl x86_64::structures::paging::FrameAllocator<Size4KiB> for FrameAllocator {
     fn allocate_frame(&mut self) -> Option<x86_64::structures::paging::PhysFrame<Size4KiB>> {
+        let frame = alloc_frame()?;
+        unsafe { Some(PhysFrame::from_start_address_unchecked(frame)) }
+    }
+}
+
+pub struct KernelAddressSpace {
+    page_table: VirtAddr,
+}
+
+// TODO: this should be an RwLock
+pub static KERNEL_ADDRESS_SPACE: BootInit<IrqLock<KernelAddressSpace>> = unsafe { BootInit::uninit() };
+
+pub unsafe fn init(global_page_table: PhysAddr) {
+    unsafe {
+        BootInit::set(
+            &KERNEL_ADDRESS_SPACE,
+            IrqLock::new(KernelAddressSpace {
+                page_table: phys_to_virt(global_page_table),
+            }),
+        );
+    }
+}
+
+impl KernelAddressSpace {
+    fn offset_page_table(&mut self) -> OffsetPageTable<'_> {
+        unsafe { OffsetPageTable::new(&mut *self.page_table.as_mut_ptr(), PHYSICAL_MEMORY_OFFSET) }
+    }
+    pub unsafe fn map_new_page(&mut self, addr: VirtAddr) -> Option<()> {
         unsafe {
-            kernel_alloc(FRAME_LAYOUT)
-                .map(|x| PhysFrame::from_start_address_unchecked(virt_to_phys(x).unwrap()))
+            let phys = alloc_frame()?;
+            self.offset_page_table()
+                .map_to(
+                    Page::<Size4KiB>::from_start_address_unchecked(addr),
+                    PhysFrame::from_start_address_unchecked(phys),
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::GLOBAL,
+                    &mut FrameAllocator,
+                )
+                .unwrap()
+                .flush();
+            Some(())
+        }
+    }
+    pub unsafe fn unmap_page(&mut self, addr: VirtAddr) {
+        unsafe {
+            let (frame, flush) = self
+                .offset_page_table()
+                .unmap(Page::<Size4KiB>::from_start_address_unchecked(addr))
+                .unwrap();
+            flush.flush();
+            kernel_free(phys_to_virt(frame.start_address()));
         }
     }
 }
@@ -40,16 +77,16 @@ pub struct Mapping {
     size: usize,
 }
 
-pub struct AddressSpace {
+pub struct UserAddressSpace {
     page_table: VirtAddr,
     mappings: Vec<Mapping>,
 }
 
-impl AddressSpace {
+impl UserAddressSpace {
     pub fn new() -> Option<Self> {
-        let guard = GLOBAL_PAGE_TABLE.lock();
-        let global: &PageTable = unsafe { &*(*guard).as_ptr() };
-        let addr = kernel_alloc(FRAME_LAYOUT)?;
+        let guard = KERNEL_ADDRESS_SPACE.lock();
+        let global: &PageTable = unsafe { &*(*guard).page_table.as_ptr() };
+        let addr = phys_to_virt(alloc_frame()?);
         let new: &mut PageTable = unsafe { &mut *addr.as_mut_ptr() };
         for i in 0..256 {
             new[i] = PageTableEntry::new();
@@ -57,7 +94,7 @@ impl AddressSpace {
         for i in 256..512 {
             new[i] = global[i].clone();
         }
-        Some(AddressSpace {
+        Some(UserAddressSpace {
             page_table: addr,
             mappings: Vec::new(),
         })
@@ -76,7 +113,7 @@ impl AddressSpace {
     }
 }
 
-impl Drop for AddressSpace {
+impl Drop for UserAddressSpace {
     fn drop(&mut self) {
         // TODO: free page table
     }
@@ -85,9 +122,14 @@ impl Drop for AddressSpace {
 fn unhandled_fault(ctx: &mut IrqContext, addr: VirtAddr) -> ! {
     println!(
         "Page fault at {:#x}, error code: {:#x}",
-        addr, ctx.trap_frame().error_code
+        addr,
+        ctx.trap_frame().error_code
     );
-    println!("RIP {:#x}, RSP {:#x}", ctx.trap_frame().rip, ctx.trap_frame().rsp);
+    println!(
+        "RIP {:#x}, RSP {:#x}",
+        ctx.trap_frame().rip,
+        ctx.trap_frame().rsp
+    );
     loop {}
 }
 

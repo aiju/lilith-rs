@@ -5,13 +5,18 @@ use core::{
 
 use x86_64::VirtAddr;
 
-use crate::memory::{
-    FRAME_SIZE, kernel_alloc, kernel_alloc_ptr, kernel_free,
-    rbtree::{Augment, RbNode, RbTree},
+use crate::{
+    memory::{
+        FRAME_SIZE,
+        address_space::KERNEL_ADDRESS_SPACE,
+        direct_alloc_ptr, kernel_free,
+        rbtree::{Augment, RbNode, RbTree},
+    },
+    sync::IrqLock,
 };
 
-const VIRTUAL_ALLOC_START: u64 = 0xFFFF_A000_0000_0000;
-const VIRTUAL_ALLOC_END: u64 = 0xFFFF_B000_0000_0000;
+pub const VIRTUAL_ALLOCATOR_START: VirtAddr = VirtAddr::new_truncate(0xFFFF_A000_0000_0000);
+pub const VIRTUAL_ALLOCATOR_END: VirtAddr = VirtAddr::new_truncate(0xFFFF_B000_0000_0000);
 
 struct Span<A, V> {
     start: A,
@@ -112,31 +117,80 @@ impl<A: Address, V> SpanAlloc<A, V> {
             return None;
         }
     }
-    pub fn alloc(&mut self, size: A, value: V) -> Option<A> {
+    pub fn alloc(&mut self, size: A, value: V) -> Option<Range<A>> {
         let gap = self.find_gap(size)?;
+        let range = gap.start..gap.start + size;
         let span = Span {
-            start: gap.start,
-            end: gap.start + size,
+            start: range.start,
+            end: range.end,
             value,
         };
-        let node = kernel_alloc_ptr().unwrap();
+        // TODO: maybe alloc + write should be a utility function ?
+        let node = direct_alloc_ptr()?;
         unsafe { core::ptr::write(node, RbNode::new(span)) };
-        self.spans.insert(node, |x, y| A::cmp(&x.start, &y.start));
-        Some(gap.start)
+        unsafe { self.spans.insert(node, |x, y| A::cmp(&x.start, &y.start)) };
+        Some(range)
     }
-    pub unsafe fn free(&mut self, addr: A) {
+    pub fn span_containing(&self, addr: A) -> Option<&V> {
+        self.spans
+            .find(|span, _| {
+                if addr < span.start {
+                    core::cmp::Ordering::Greater
+                } else if addr >= span.end {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Equal
+                }
+            })
+            .map(|x| unsafe { &(*x).value().value })
+    }
+    pub unsafe fn free(&mut self, addr: A) -> (Range<A>, V) {
         let node = self
             .spans
             .find(|vmap, _| vmap.start.cmp(&addr))
             .expect("free with pointer not virtual_alloc'd");
-        self.spans.remove(node);
-        unsafe { kernel_free(VirtAddr::from_ptr(node)) };
+        unsafe {
+            self.spans.remove(node);
+            let span = core::ptr::read(node).into_value();
+            kernel_free(VirtAddr::from_ptr(node));
+            (span.start..span.end, span.value)
+        }
     }
 }
 
 impl<A: Address + core::fmt::Debug, V> SpanAlloc<A, V> {
     fn check(&self) {
         self.spans.check(|x, y| A::cmp(&x.start, &y.start));
+    }
+}
+
+pub struct VirtualAllocator {
+    spans: SpanAlloc<u64, ()>,
+}
+
+pub static VIRTUAL_ALLOCATOR: IrqLock<VirtualAllocator> = IrqLock::new(VirtualAllocator::new());
+
+impl VirtualAllocator {
+    pub const fn new() -> Self {
+        VirtualAllocator {
+            spans: SpanAlloc::new(VIRTUAL_ALLOCATOR_START.as_u64()..VIRTUAL_ALLOCATOR_END.as_u64()),
+        }
+    }
+    pub fn alloc(&mut self, layout: Layout) -> Option<VirtAddr> {
+        let layout = layout.align_to(FRAME_SIZE).unwrap().pad_to_align();
+        let range = self.spans.alloc(layout.size() as u64, ())?;
+        let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
+        for addr in range.clone().step_by(FRAME_SIZE) {
+            unsafe { kernel_as.map_new_page(VirtAddr::new_unsafe(addr)) };
+        }
+        Some(VirtAddr::new(range.start))
+    }
+    pub unsafe fn free(&mut self, addr: VirtAddr) {
+        let (range, _) = unsafe { self.spans.free(addr.as_u64()) };
+        let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
+        for addr in range.clone().step_by(FRAME_SIZE) {
+            unsafe { kernel_as.unmap_page(VirtAddr::new_unsafe(addr)) };
+        }
     }
 }
 
@@ -160,7 +214,7 @@ fn test_span_alloc() {
                 let i = rng.usize(0..allocations.len());
                 let v = allocations.swap_remove(i);
                 //serial_println!("free({:?}\n", v);
-                unsafe { valloc.free(v) };
+                unsafe { valloc.free(v.start) };
             }
 
             valloc.check();
@@ -173,4 +227,30 @@ fn test_span_alloc() {
             assert!(right_bound <= range.end);
         }
     }
+}
+
+#[test_case]
+fn test_virtual_alloc() {
+    use core::sync::atomic::AtomicU32;
+    use core::sync::atomic::Ordering::Relaxed;
+
+    let mut va = VIRTUAL_ALLOCATOR.lock();
+    let n = 2 * 1024 * 1024;
+    let sp: &mut [AtomicU32] = unsafe {
+        core::slice::from_raw_parts_mut(
+            va.alloc(Layout::from_size_align(n * 4, 4096).unwrap())
+                .unwrap()
+                .as_mut_ptr(),
+            n,
+        )
+    };
+    let mut rng = fastrand::Rng::with_seed(42);
+    for i in 0..n {
+        sp[i].store(rng.u32(..), Relaxed);
+    }
+    let mut rng = fastrand::Rng::with_seed(42);
+    for i in 0..n {
+        assert_eq!(sp[i].load(Relaxed), rng.u32(..));
+    }
+    unsafe { va.free(VirtAddr::from_ptr(sp.as_ptr())) }
 }

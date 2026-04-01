@@ -83,6 +83,9 @@ impl<T, V> RbNode<T, V> {
     pub fn value(&self) -> &T {
         &self.value
     }
+    pub fn into_value(self) -> T {
+        self.value
+    }
     pub fn augment(&self) -> &V {
         self.augment
             .as_ref()
@@ -139,6 +142,9 @@ impl<T, V> RbNode<T, V> {
 pub struct RbTree<T, V> {
     head: *mut RbNode<T, V>,
 }
+
+unsafe impl<T, V> Sync for RbTree<T, V> {}
+unsafe impl<T, V> Send for RbTree<T, V> {}
 
 fn color<T, V>(node: *mut RbNode<T, V>) -> Color {
     unsafe { if node.is_null() { Black } else { (*node).color } }
@@ -323,7 +329,8 @@ where
             None
         }
     }
-    pub fn insert(&mut self, node: *mut RbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
+    // SAFETY: node is a valid pointer. you are passing ownership to the tree
+    pub unsafe fn insert(&mut self, node: *mut RbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
         unsafe {
             place(&raw mut self.head, node, cmp);
             mark_dirty((*node).parent);
@@ -426,7 +433,8 @@ where
             }
         }
     }
-    pub fn remove(&mut self, node: *mut RbNode<T, V>) {
+    // SAFETY: node is a valid pointer to a node currently in the tree
+    pub unsafe fn remove(&mut self, node: *mut RbNode<T, V>) {
         unsafe {
             let (fixup_parent, fixup_child, removed_color) = self.unplace(node);
             if removed_color == Red {
@@ -507,7 +515,7 @@ impl<'a, T, V> Iterator for RbTreeIterator<'a, T, V> {
 #[allow(dead_code)]
 mod tests {
     use super::*;
-    use crate::{memory::kernel_alloc, serial_print, serial_println};
+    use crate::{memory::direct_alloc, serial_print, serial_println};
     use core::alloc::Layout;
 
     fn print_tree<T: core::fmt::Debug, V: core::fmt::Debug>(node: *mut RbNode<T, V>, depth: i32) {
@@ -583,7 +591,7 @@ mod tests {
     }
 
     fn kernel_alloc_ptr<T>() -> *mut T {
-        kernel_alloc(Layout::new::<T>()).unwrap().as_mut_ptr()
+        direct_alloc(Layout::new::<T>()).unwrap().as_mut_ptr()
     }
 
     #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]

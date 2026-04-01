@@ -11,7 +11,7 @@ use crate::{
     id_vec::IdSparseVec,
     interrupts::{IrqContext, PICS, TICK_NS},
     mach::mach,
-    memory::{FRAME_SIZE, KERNEL_STACK_SIZE, KERNEL_STACK_TOP, kernel_alloc, kernel_free},
+    memory::{FRAME_SIZE, KERNEL_STACK_SIZE, KERNEL_STACK_TOP, direct_alloc, kernel_free},
     sync::{IrqLock, IrqLockGuard},
     user::Proc,
 };
@@ -85,7 +85,7 @@ impl Scheduler {
     }
     fn spawn_inner(&mut self, fun: fn(*const ()), data: *const (), size: usize, align: usize) {
         let stack_size = 16384;
-        let stack = kernel_alloc(Layout::from_size_align(stack_size, FRAME_SIZE).unwrap()).unwrap();
+        let stack = direct_alloc(Layout::from_size_align(stack_size, FRAME_SIZE).unwrap()).unwrap();
         let mut rsp = (stack + stack_size - size).align_down(align as u64);
         rsp = rsp.align_down(16u64); // SysV ABI requires 16-byte stack alignment
         assert!(rsp >= stack + MIN_STACK);

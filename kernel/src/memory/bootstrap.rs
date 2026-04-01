@@ -16,7 +16,6 @@ use x86_64::{
 
 use crate::memory::FRAME_LAYOUT;
 use crate::memory::buddy::buddy_init;
-use crate::memory::address_space::set_global_page_table_address;
 use crate::memory::slub::slub_init;
 use crate::memory::{
     BOOT_INFO, KERNEL_STACK_SIZE, KERNEL_STACK_TOP, PHYSICAL_MEMORY_MAX_SIZE,
@@ -249,7 +248,7 @@ pub unsafe fn init(boot_info: &'static BootInfo) {
 
         let mut boot_alloc = BootAlloc::new(&boot_info.memory_map);
         let page_table = boot_alloc.alloc(Layout::from_size_align_unchecked(4096, 4096));
-        set_global_page_table_address(page_table);
+        super::address_space::init(page_table);
         let offset_page_table =
             OffsetPageTable::new(phys_to_mut(page_table), PHYSICAL_MEMORY_OFFSET);
         let previous_table_ref = phys_to_mut(Cr3::read().0.start_address());
