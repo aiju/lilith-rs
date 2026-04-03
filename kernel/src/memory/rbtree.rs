@@ -1,3 +1,5 @@
+use crate::prelude::*;
+
 use core::{
     cmp::Ordering,
     marker::PhantomData,
@@ -515,23 +517,23 @@ impl<'a, T, V> Iterator for RbTreeIterator<'a, T, V> {
 #[allow(dead_code)]
 mod tests {
     use super::*;
-    use crate::{memory::direct_alloc, serial_print, serial_println};
+    use crate::{memory::direct_alloc};
     use core::alloc::Layout;
 
     fn print_tree<T: core::fmt::Debug, V: core::fmt::Debug>(node: *mut RbNode<T, V>, depth: i32) {
         unsafe {
             for _ in 0..depth {
-                serial_print!("+");
+                print!("+");
             }
             if color(node) == Red {
-                serial_print!("R ");
+                print!("R ");
             } else {
-                serial_print!("B ");
+                print!("B ");
             }
             if node.is_null() {
-                serial_println!("nil");
+                println!("nil");
             } else {
-                serial_println!("{:?} [{:?}]", (*node).value, (*node).augment);
+                println!("{:?} [{:?}]", (*node).value, (*node).augment);
                 print_tree((*node).left, depth + 1);
                 print_tree((*node).right, depth + 1);
             }

@@ -14,14 +14,13 @@ mod memory;
 mod prelude;
 mod ramfs;
 mod sched;
-mod serial;
 mod sync;
 mod tasks;
 #[cfg(test)]
 mod test;
 mod user;
-mod vga_buffer;
 mod util;
+mod device;
 
 extern crate alloc;
 
@@ -66,6 +65,7 @@ entry_point!(main);
 fn main(boot_info: &'static BootInfo) -> ! {
     unsafe {
         let interrupt_guard = mach::init();
+        device::early_init();
         interrupts::init();
         memory::init(boot_info);
         sched::init();

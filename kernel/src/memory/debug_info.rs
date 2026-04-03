@@ -1,7 +1,12 @@
+use crate::prelude::*;
 use arrayvec::ArrayVec;
-use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::{PageTable, PageTableFlags}};
+use x86_64::{
+    VirtAddr,
+    registers::control::Cr3,
+    structures::paging::{PageTable, PageTableFlags},
+};
 
-use crate::{memory::{PHYSICAL_MEMORY_OFFSET, phys_to_mut}, serial_println};
+use crate::memory::{PHYSICAL_MEMORY_OFFSET, phys_to_mut};
 
 struct MapRegion {
     virt_start: u64,
@@ -76,7 +81,7 @@ fn print_map(table: &PageTable, physical_memory_offset: VirtAddr) {
             (r.size >> 10, "KiB")
         };
 
-        serial_println!(
+        println!(
             "{:016x}-{:016x} -> {:012x}-{:012x} ({} {}) {:?}",
             r.virt_start,
             r.virt_start + r.size,

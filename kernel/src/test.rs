@@ -1,5 +1,6 @@
+use crate::prelude::*;
+
 use core::panic::PanicInfo;
-use crate::{serial_print, serial_println};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -20,7 +21,7 @@ fn exit_qemu(exit_code: QemuExitCode) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    serial_println!("[failed]\n{}", info);
+    println!("[failed]\n{}", info);
     exit_qemu(QemuExitCode::Failed);
 }
 
@@ -32,14 +33,14 @@ impl<T> Testable for T
 where T: Fn()
 {
     fn run(&self) {
-        serial_print!("{}...\t", core::any::type_name::<T>());
+        print!("{}...\t", core::any::type_name::<T>());
         self();
-        serial_println!("[ok]\n");
+        println!("[ok]\n");
     }
 }
 
 pub fn test_runner(tests: &[&dyn Testable]) {
-    serial_println!("Lilith Tests\nRunning {} tests...\n", tests.len());
+    println!("Lilith Tests\nRunning {} tests...\n", tests.len());
     for test in tests {
         test.run();
     }

@@ -1,9 +1,10 @@
-use core::fmt;
-use lazy_static::lazy_static;
 use volatile::Volatile;
 use x86_64::PhysAddr;
 
-use crate::{memory::phys_to_mut, sync::IrqLock};
+use crate::{
+    memory::phys_to_mut,
+    sync::{BootInit, IrqLock},
+};
 
 /// Unicode codepoints in ascending order (for binary search lookup).
 const UNICODE_TO_CP437_KEYS: [u16; 128] = [
@@ -148,34 +149,28 @@ impl Writer {
     }
 }
 
-impl fmt::Write for Writer {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_string(s);
-        Ok(())
+impl super::Writer for Writer {
+    fn write(&mut self, data: &[u8]) {
+        for chunk in data.utf8_chunks() {
+            self.write_string(chunk.valid());
+            if !chunk.invalid().is_empty() {
+                self.write_byte(0xfe);
+            }
+        }
     }
 }
 
-lazy_static! {
-    pub static ref WRITER: IrqLock<Writer> = IrqLock::new(Writer {
-        column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { phys_to_mut(PhysAddr::new(0xb8000)) },
-    });
-}
+pub static WRITER: BootInit<IrqLock<Writer>> = unsafe { BootInit::uninit() };
 
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
-}
-
-#[macro_export]
-macro_rules! println {
-    () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
-}
-
-#[doc(hidden)]
-pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+pub unsafe fn init() {
+    unsafe {
+        BootInit::set(
+            &WRITER,
+            IrqLock::new(Writer {
+                column_position: 0,
+                color_code: ColorCode::new(Color::Yellow, Color::Black),
+                buffer: phys_to_mut(PhysAddr::new(0xb8000)),
+            }),
+        )
+    };
 }

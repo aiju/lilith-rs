@@ -1,3 +1,5 @@
+use crate::prelude::*;
+
 use core::{arch::asm, marker::PhantomData, sync::atomic::Ordering};
 
 use alloc::sync::Arc;
@@ -5,7 +7,10 @@ use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::PhysFrame};
 use xmas_elf::{ElfFile, program::SegmentData};
 
 use crate::{
-    mach::{USER_CODE_SELECTOR, mach}, memory::{MemoryError, UserAddressSpace}, println, sched::thread_stack, sync::{IrqLock, interrupt_guard}
+    mach::{USER_CODE_SELECTOR, mach},
+    memory::{MemoryError, UserAddressSpace},
+    sched::thread_stack,
+    sync::{IrqLock, interrupt_guard},
 };
 
 pub const USER_STACK_BOTTOM: u64 = 0x0000_7FFF_0000_0000;
@@ -89,7 +94,7 @@ impl ActiveProc {
     }
 
     /// launch replaces the current kernel thread with a user process
-    /// 
+    ///
     /// in particular the current kernel thread is destroyed and re-used for syscalls and interrupts of that user process
     pub unsafe fn launch(&self, entry: u64) -> ! {
         println!("go to user!!");

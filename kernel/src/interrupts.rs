@@ -9,7 +9,6 @@ use crate::{
         USER_DATA_SELECTOR, mach,
     },
     memory::page_fault_handler,
-    print,
     sched::{SCHEDULER, SchedReason, sched, thread_sleep, timer_interrupt},
     sync::{InterruptGuard, IrqLock, IrqLockGuard, interrupt_guard},
 };
