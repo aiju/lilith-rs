@@ -1,30 +1,54 @@
 ENTRY(_start)
 
-KERNEL_OFFSET = 0xFFFFFFFF80000000;
+LOAD_ADDRESS = 0x100000;
+KERNEL_OFFSET = 0xFFFFFFFF80100000;
 
 SECTIONS {
-    . = KERNEL_OFFSET;
+    . = LOAD_ADDRESS;
+    .boot : {
+        __text_start = . - LOAD_ADDRESS + KERNEL_OFFSET;
+        __text_start_phys = .;
+        *(.boot)
+    }
 
-    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_OFFSET) {
-        __text_start = .;
-        *(.text.boot)
+    . = KERNEL_OFFSET + (. - LOAD_ADDRESS);
+
+    .text : AT(ADDR(.text) - KERNEL_OFFSET + LOAD_ADDRESS) {
         *(.text .text.*)
     }
 
-    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_OFFSET) {
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_OFFSET + LOAD_ADDRESS) {
         *(.rodata .rodata.*)
+        *(.eh_frame_hdr)
+        *(.eh_frame)
     }
 
-    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_OFFSET) {
+    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_OFFSET + LOAD_ADDRESS) {
         __data_start = .;
+        __data_start_phys = . - KERNEL_OFFSET + LOAD_ADDRESS;
         *(.data.rel.ro .data.rel.ro.*)
         *(.got .got.*)
         *(.data .data.*)
+        __data_end = .;
+        __data_end_phys = . - KERNEL_OFFSET + LOAD_ADDRESS;
     }
 
-    .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_OFFSET) {
+    .bss (NOLOAD) : AT(ADDR(.bss) - KERNEL_OFFSET + LOAD_ADDRESS) {
         __bss_start = .;
         *(.bss .bss.*)
-        __bss_end = .;
+        . = ALIGN(4K);
+        __reclaimable_start_phys = LOAD_ADDRESS + (. - KERNEL_OFFSET);
+        *(.boot_reclaimable);
     }
+
+    . = LOAD_ADDRESS + (. - KERNEL_OFFSET);
+
+    .boot_reclaimable_phys (NOLOAD) : AT(ADDR(.boot_reclaimable_phys)) {
+        *(.boot_reclaimable_phys)
+        __reclaimable_end_phys = .;
+    }
+
+    . = KERNEL_OFFSET + (. - LOAD_ADDRESS);
+    __bss_end = .;
+    __bss_end_phys = . - KERNEL_OFFSET + LOAD_ADDRESS;
 }

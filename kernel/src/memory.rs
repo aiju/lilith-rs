@@ -26,9 +26,8 @@ use crate::util::clog2;
 
 pub const PHYSICAL_MEMORY_OFFSET: VirtAddr = VirtAddr::new_truncate(0xFFFF_8000_0000_0000);
 pub const PHYSICAL_MEMORY_MAX_SIZE: usize = 4 * 1024 * 1024 * 1024 * 1024;
-pub const KERNEL_STACK_TOP: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFF_A000_0000);
+pub const KERNEL_STACK_TOP: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFF_A000_0000); // needs to match boot.s
 pub const KERNEL_STACK_SIZE: usize = 255 * 4096;
-pub const BOOT_INFO: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFF_9000_0000);
 
 pub const FRAME_LAYOUT: Layout =
     unsafe { Layout::from_size_align_unchecked(FRAME_SIZE, FRAME_SIZE) };

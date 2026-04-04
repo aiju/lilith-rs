@@ -5,6 +5,7 @@ use spin::{Mutex, MutexGuard};
 use crate::mach::mach;
 
 #[must_use = "interrupt guard re-enables interrupts when dropped"]
+#[repr(transparent)]
 pub struct InterruptGuard(());
 
 impl InterruptGuard {

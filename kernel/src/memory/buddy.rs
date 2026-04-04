@@ -93,6 +93,7 @@ impl BuddyAllocator {
 ///
 /// we assume the FrameInfo structs are already mapped in the correct locations and initialised to show all memory as reserved
 pub(super) unsafe fn buddy_init(free_ranges: impl Iterator<Item = Range<PhysAddr>>) {
+    // have to be careful not to touch the memory pointed to by free_ranges just yet
     assert!(core::mem::size_of::<FrameInfo>().is_power_of_two());
 
     let mut buddy_allocator = BUDDY_ALLOCATOR.lock();

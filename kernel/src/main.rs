@@ -7,6 +7,7 @@
 #![feature(isolate_most_least_significant_one)]
 #![allow(dead_code)]
 
+mod device;
 mod id_vec;
 mod interrupts;
 mod mach;
@@ -20,7 +21,6 @@ mod tasks;
 mod test;
 mod user;
 mod util;
-mod device;
 
 extern crate alloc;
 
@@ -28,10 +28,13 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use alloc::sync::Arc;
-use bootloader::{BootInfo, entry_point};
 
 use crate::{
-    ramfs::ram_fs, sched::thread_spawn, tasks::{task_sleep, task_spawn}, user::Proc
+    ramfs::ram_fs,
+    sched::thread_spawn,
+    sync::InterruptGuard,
+    tasks::{task_sleep, task_spawn},
+    user::Proc,
 };
 
 #[cfg(not(test))]
@@ -61,13 +64,28 @@ fn os_main() {
     });
 }
 
-entry_point!(main);
-fn main(boot_info: &'static BootInfo) -> ! {
+#[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
+pub extern "C" fn early_init(multiboot_info: x86_64::PhysAddr) -> InterruptGuard {
+    // this runs on the boot stack
+    // you must not use normal memory allocator (Box, Vec, kernel_alloc, ...) anywhere here
+    // even after memory::init, because the memory allocator might reclaim the boot stack!
+
     unsafe {
         let interrupt_guard = mach::init();
         device::early_init();
         interrupts::init();
-        memory::init(boot_info);
+        memory::init(multiboot_info);
+        interrupt_guard
+    }
+}
+
+// we pass the InterruptGuard from early_init to main via magic -- it's a ZST so the assembly stub doesnt have to do anything
+
+#[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
+pub extern "C" fn main(interrupt_guard: InterruptGuard) -> ! {
+    unsafe {
         sched::init();
         tasks::init();
         ramfs::init();

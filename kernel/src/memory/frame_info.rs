@@ -65,6 +65,11 @@ impl FrameInfo {
             core::ptr::write(ptr, fi);
         }
     }
+    pub(super) unsafe fn new_page(ptr: *mut FrameInfo) {
+        for i in 0..FRAME_SIZE / core::mem::size_of::<FrameInfo>() {
+            unsafe { Self::new_at(ptr.add(i)) }
+        }
+    }
 
     pub unsafe fn addr(&self) -> PhysAddr {
         from_frame_info_addr(VirtAddr::from_ptr(self))

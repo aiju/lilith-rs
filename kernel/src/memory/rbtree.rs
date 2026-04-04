@@ -1,10 +1,6 @@
 use crate::prelude::*;
 
-use core::{
-    cmp::Ordering,
-    marker::PhantomData,
-    ptr::null_mut,
-};
+use core::{cmp::Ordering, marker::PhantomData, ptr::null_mut};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 enum Color {
@@ -187,7 +183,7 @@ fn place<T, V>(
     }
 }
 
-fn successor<T, V>(node: *mut RbNode<T, V>) -> *mut RbNode<T, V> {
+fn successor_child<T, V>(node: *mut RbNode<T, V>) -> *mut RbNode<T, V> {
     unsafe {
         let mut n = (*node).right;
         while !(*n).left.is_null() {
@@ -331,6 +327,21 @@ where
             None
         }
     }
+    pub fn lower_bound(&self, mut eval: impl FnMut(&T, &V) -> bool) -> Option<*mut RbNode<T, V>> {
+        unsafe {
+            let mut node = self.head;
+            let mut candidate = None;
+            while !node.is_null() {
+                if eval(&(*node).value, (*node).augment()) {
+                    candidate = Some(node);
+                    node = (*node).left;
+                } else {
+                    node = (*node).right;
+                }
+            }
+            candidate
+        }
+    }
     // SAFETY: node is a valid pointer. you are passing ownership to the tree
     pub unsafe fn insert(&mut self, node: *mut RbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
         unsafe {
@@ -362,7 +373,7 @@ where
                 }
                 (false, false) => {
                     // we have to splice the successor into the original location
-                    let succ = successor(node);
+                    let succ = successor_child(node);
                     // successor has no left node so we can replace it by its child
                     let fixup_parent = if (*succ).parent == node {
                         succ
@@ -467,18 +478,45 @@ impl<T, V: Augment<T> + Eq + core::fmt::Debug> RbTree<T, V> {
 }
 
 impl<T, V> RbTree<T, V> {
-    pub fn iter(&self) -> RbTreeIterator<'_, T, V> {
+    pub fn lowest_node(&self) -> Option<*mut RbNode<T, V>> {
         let mut node = self.head;
         unsafe {
             if !node.is_null() {
                 while !(*node).left.is_null() {
                     node = (*node).left;
                 }
+                Some(node)
+            } else {
+                None
             }
         }
+    }
+    pub fn iter(&self) -> RbTreeIterator<'_, T, V> {
         RbTreeIterator {
-            node,
+            node: self.lowest_node().unwrap_or_default(),
             _phantom: PhantomData::default(),
+        }
+    }
+}
+
+impl<T, V> RbNode<T, V> {
+    pub fn successor(&self) -> Option<*mut RbNode<T, V>> {
+        let mut n = self as *const RbNode<T, V> as *mut RbNode<T, V>;
+        unsafe {
+            if (*n).right.is_null() {
+                loop {
+                    let child = n;
+                    n = (*n).parent;
+                    if n.is_null() {
+                        return None;
+                    }
+                    if (*n).left == child {
+                        return Some(n);
+                    }
+                }
+            } else {
+                return Some(successor_child(n));
+            }
         }
     }
 }
@@ -497,17 +535,7 @@ impl<'a, T, V> Iterator for RbTreeIterator<'a, T, V> {
         } else {
             unsafe {
                 let ret = self.node;
-                if (*self.node).right.is_null() {
-                    loop {
-                        let child = self.node;
-                        self.node = (*self.node).parent;
-                        if self.node.is_null() || (*self.node).left == child {
-                            break;
-                        }
-                    }
-                } else {
-                    self.node = successor(self.node);
-                }
+                self.node = (*self.node).successor().unwrap_or_default();
                 Some(&*ret)
             }
         }
@@ -517,7 +545,7 @@ impl<'a, T, V> Iterator for RbTreeIterator<'a, T, V> {
 #[allow(dead_code)]
 mod tests {
     use super::*;
-    use crate::{memory::direct_alloc};
+    use crate::memory::direct_alloc;
     use core::alloc::Layout;
 
     fn print_tree<T: core::fmt::Debug, V: core::fmt::Debug>(node: *mut RbNode<T, V>, depth: i32) {
