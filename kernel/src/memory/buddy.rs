@@ -1,11 +1,10 @@
-use core::ops::Range;
-
 use x86_64::PhysAddr;
 
 use crate::{
-    memory::{MemoryError, frame_info::{
-        FRAME_INFO_SHIFT, FRAME_SHIFT, FRAME_SIZE, FrameInfo, FrameType, frame_info,
-    }},
+    memory::{
+        MemoryError,
+        frame_info::{FRAME_INFO_SHIFT, FRAME_SHIFT, FRAME_SIZE, FrameInfo, FrameType, frame_info},
+    },
     sync::IrqLock,
 };
 
@@ -89,33 +88,35 @@ impl BuddyAllocator {
     }
 }
 
-/// initialize the buddy allocator with the given ranges as free memory
+/// initialize the buddy allocator
 ///
 /// we assume the FrameInfo structs are already mapped in the correct locations and initialised to show all memory as reserved
-pub(super) unsafe fn buddy_init(free_ranges: impl Iterator<Item = Range<PhysAddr>>) {
+pub(super) unsafe fn buddy_init() {
     // have to be careful not to touch the memory pointed to by free_ranges just yet
     assert!(core::mem::size_of::<FrameInfo>().is_power_of_two());
 
     let mut buddy_allocator = BUDDY_ALLOCATOR.lock();
     buddy_allocator.init();
-    for range in free_ranges {
-        let mut addr = range.start;
-        let end = range.end;
-        assert!(addr.is_aligned(FRAME_SIZE as u64) && end.is_aligned(FRAME_SIZE as u64));
-        while addr < end {
-            let order = ((addr.as_u64() >> FRAME_SHIFT) | (1 << MAX_ORDER))
-                .trailing_zeros()
-                .min((end - addr).ilog2() - FRAME_SHIFT as u32) as usize;
-            let fi = frame_info(addr);
-            unsafe {
-                buddy_allocator.heads[order].insert(&raw mut (*fi.u.get()).buddy_list);
-                fi.set_ty(FrameType::Buddy);
-                for a in (addr.as_u64() + FRAME_SIZE as u64..end.as_u64()).step_by(FRAME_SIZE) {
-                    frame_info(PhysAddr::new_unsafe(a)).set_ty(FrameType::BuddyTail);
-                }
+}
+
+pub(super) unsafe fn buddy_add_range(mut addr: PhysAddr, end: PhysAddr) {
+    // have to be careful not to actually touch the memory
+    // because during reclaiming we are adding memory that is still in use (boot stack, BootAlloc)
+    let mut buddy_allocator = BUDDY_ALLOCATOR.lock();
+    assert!(addr.is_aligned(FRAME_SIZE as u64) && end.is_aligned(FRAME_SIZE as u64));
+    while addr < end {
+        let order = ((addr.as_u64() >> FRAME_SHIFT) | (1 << MAX_ORDER))
+            .trailing_zeros()
+            .min((end - addr).ilog2() - FRAME_SHIFT as u32) as usize;
+        let fi = frame_info(addr);
+        unsafe {
+            buddy_allocator.heads[order].insert(&raw mut (*fi.u.get()).buddy_list);
+            fi.set_ty(FrameType::Buddy);
+            for a in (addr.as_u64() + FRAME_SIZE as u64..end.as_u64()).step_by(FRAME_SIZE) {
+                frame_info(PhysAddr::new_unsafe(a)).set_ty(FrameType::BuddyTail);
             }
-            addr += 1u64 << (order + FRAME_SHIFT);
         }
+        addr += 1u64 << (order + FRAME_SHIFT);
     }
 }
 

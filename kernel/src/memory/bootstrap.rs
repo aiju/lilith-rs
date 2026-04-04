@@ -1,9 +1,14 @@
 use crate::memory::rbtree::{Augment, RbNode, RbTree};
+#[allow(unused_imports)]
 use crate::prelude::*;
+use crate::sync::BootInit;
 
+use core::ffi::CStr;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use x86_64::PhysAddr;
 
 use core::fmt::Debug;
@@ -19,7 +24,7 @@ use x86_64::{
 };
 
 use crate::memory::FRAME_LAYOUT;
-use crate::memory::buddy::buddy_init;
+use crate::memory::buddy::{buddy_add_range, buddy_init};
 use crate::memory::slub::slub_init;
 use crate::memory::{
     KERNEL_STACK_SIZE, KERNEL_STACK_TOP, PHYSICAL_MEMORY_MAX_SIZE, PHYSICAL_MEMORY_OFFSET,
@@ -109,6 +114,22 @@ struct MultibootInfoRaw {
     color_info: MultibootColorInfo, // 110-115
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct MultibootModuleRaw {
+    mod_start: u32,
+    mod_end: u32,
+    name: u32,
+    reserved: u32,
+}
+
+pub struct MultibootModule {
+    pub name: String,
+    pub contents: &'static [u8],
+}
+
+pub static MULTIBOOT_MODULES: BootInit<Vec<MultibootModule>> = unsafe { BootInit::uninit() };
+
 impl core::fmt::Debug for MultibootInfoRaw {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MultibootInfoRaw")
@@ -191,6 +212,15 @@ impl MultibootInfoRaw {
             _phantom: Default::default(),
         }
     }
+
+    fn modules(&self) -> &[MultibootModuleRaw] {
+        unsafe {
+            core::slice::from_raw_parts(
+                phys_to_virt(PhysAddr::new_unsafe(self.mods_addr as u64)).as_mut_ptr(),
+                self.mods_count as usize,
+            )
+        }
+    }
 }
 
 impl<'a> Iterator for MultibootMmapIter<'a> {
@@ -263,6 +293,7 @@ struct BootAlloc {
     free_node: *mut NodeSlot,
 }
 
+#[unsafe(link_section = ".boot_reclaimable")]
 static mut SPANS: [NodeSlot; 128] = [const { MaybeUninit::uninit() }; 128];
 
 impl BootAlloc {
@@ -449,6 +480,44 @@ impl BootAlloc {
             }
         }
     }
+    pub fn claim_free_ranges(&mut self) {
+        // claim any full pages from the free ranges
+        unsafe {
+            self.compact();
+            let mut addr = 0;
+            while let Some(node) = self.tree.lower_bound(|s, _| s.start >= addr) {
+                let span = *(*node).value();
+                if span.span_type == SpanType::Free {
+                    let start = PhysAddr::new_unsafe(span.start).align_up(4096u64);
+                    let end = PhysAddr::new_unsafe(span.end).align_down(4096u64);
+                    if end > start {
+                        buddy_add_range(start, end);
+                        self.remove(node);
+                        self.insert(Span {
+                            start: start.as_u64(),
+                            end: end.as_u64(),
+                            span_type: SpanType::InUse,
+                        });
+                        if span.start < start.as_u64() {
+                            self.insert(Span {
+                                start: span.start,
+                                end: start.as_u64(),
+                                span_type: SpanType::Free,
+                            });
+                        }
+                        if end.as_u64() < span.end {
+                            self.insert(Span {
+                                start: end.as_u64(),
+                                end: span.end,
+                                span_type: SpanType::Free,
+                            });
+                        }
+                    }
+                }
+                addr = span.end;
+            }
+        }
+    }
 }
 
 struct ReclaimableRangeIter<'a> {
@@ -631,7 +700,48 @@ impl Bootstrap<'_> {
     }
 }
 
-pub unsafe fn init(multiboot_info_addr: PhysAddr) {
+fn get_string<'a>(addr: u32) -> &'a CStr {
+    unsafe { CStr::from_ptr(phys_to_virt(PhysAddr::new_unsafe(addr as u64)).as_ptr()) }
+}
+
+fn mark_string(boot_alloc: &mut BootAlloc, addr: u32) {
+    boot_alloc.mark_reclaimable(addr as u64, get_string(addr).count_bytes() as u64 + 1);
+}
+
+fn mark_modules(boot_alloc: &mut BootAlloc, multiboot_info: &MultibootInfoRaw) {
+    if multiboot_info.flags & 1 << 3 == 0 {
+        return;
+    }
+    boot_alloc.mark_reclaimable(
+        multiboot_info.mods_addr as u64,
+        multiboot_info.mods_count as u64 * 16,
+    );
+    for m in multiboot_info.modules() {
+        boot_alloc.mark_used(m.mod_start as u64, (m.mod_end - m.mod_start) as u64);
+        mark_string(boot_alloc, m.name);
+    }
+}
+
+fn grab_modules(multiboot_info: &MultibootInfoRaw) -> Vec<MultibootModule> {
+    unsafe {
+        multiboot_info
+            .modules()
+            .iter()
+            .map(|m| MultibootModule {
+                name: get_string(m.name)
+                    .to_str()
+                    .expect("invalid utf-8 in module name")
+                    .into(),
+                contents: core::slice::from_raw_parts(
+                    phys_to_virt(PhysAddr::new_unsafe(m.mod_start as u64)).as_ptr(),
+                    (m.mod_end - m.mod_start) as usize,
+                ),
+            })
+            .collect()
+    }
+}
+
+pub unsafe fn init(multiboot_info_addr: PhysAddr) -> Reclaimer {
     unsafe {
         let multiboot_info: &MultibootInfoRaw = &*phys_to_virt(multiboot_info_addr).as_ptr();
         #[allow(static_mut_refs)]
@@ -666,7 +776,10 @@ pub unsafe fn init(multiboot_info_addr: PhysAddr) {
             &raw const __reclaimable_end_phys as u64 - &raw const __reclaimable_start_phys as u64,
         );
 
-        // now we can allocate
+        mark_modules(&mut boot_alloc, multiboot_info);
+
+        // now we can allocate using boot_alloc
+
         let page_table = boot_alloc
             .alloc(Layout::from_size_align_unchecked(4096, 4096))
             .unwrap_or_else(|| boot_oom());
@@ -687,7 +800,33 @@ pub unsafe fn init(multiboot_info_addr: PhysAddr) {
         let flags = Cr3::read().1;
         Cr3::write(PhysFrame::from_start_address_unchecked(page_table), flags);
 
-        buddy_init(bootstrap.boot_alloc.reclaimable_range_iter());
+        let mut boot_alloc = bootstrap.boot_alloc;
+
+        buddy_init();
+        boot_alloc.claim_free_ranges();
         slub_init();
+
+        // we can use the normal allocator now
+
+        BootInit::set(&MULTIBOOT_MODULES, grab_modules(multiboot_info));
+
+        Reclaimer { boot_alloc }
+    }
+}
+
+pub struct Reclaimer {
+    boot_alloc: BootAlloc,
+}
+
+impl Drop for Reclaimer {
+    fn drop(&mut self) {
+        unsafe {
+            let mut bytes = 0;
+            for range in self.boot_alloc.reclaimable_range_iter() {
+                buddy_add_range(range.start, range.end);
+                bytes += range.end - range.start;
+            }
+            println!("reclaimed {} KB", bytes / 1024);
+        }
     }
 }

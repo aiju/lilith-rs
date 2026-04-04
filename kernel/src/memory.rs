@@ -14,6 +14,7 @@ pub use address_space::UserAddressSpace;
 pub use address_space::page_fault_handler;
 pub use bootstrap::init;
 pub use frame_info::{FRAME_SHIFT, FRAME_SIZE};
+pub use bootstrap::{MultibootModule, MULTIBOOT_MODULES};
 
 use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR;
 use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR_END;

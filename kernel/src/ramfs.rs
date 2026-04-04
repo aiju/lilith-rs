@@ -2,6 +2,8 @@ use core::slice;
 
 use include_bytes_aligned::include_bytes_aligned;
 
+use crate::{memory::MULTIBOOT_MODULES, sync::BootInit};
+
 #[repr(C)]
 #[derive(Debug)]
 struct FsHeader {
@@ -27,7 +29,12 @@ impl RamFs {
         unsafe { &*(self.data.as_ptr() as *const FsHeader) }
     }
     fn entries(&self) -> &[FsEntry] {
-        unsafe { slice::from_raw_parts(&*(self.data.as_ptr().byte_add(16) as *const FsEntry), self.header().n_files as usize) }
+        unsafe {
+            slice::from_raw_parts(
+                &*(self.data.as_ptr().byte_add(16) as *const FsEntry),
+                self.header().n_files as usize,
+            )
+        }
     }
     pub fn iter(&self) -> impl Iterator<Item = &str> {
         self.entries().iter().map(|entry| {
@@ -42,11 +49,20 @@ impl RamFs {
     }
 }
 
-static RAM_FS: RamFs = RamFs { data: include_bytes_aligned!(4096, "../../fs.img") };
+static RAM_FS: BootInit<RamFs> = unsafe { BootInit::uninit() };
 
 pub fn ram_fs() -> &'static RamFs {
     &RAM_FS
 }
 
 pub fn init() {
+    assert_eq!(MULTIBOOT_MODULES.len(), 1);
+    unsafe {
+        BootInit::set(
+            &RAM_FS,
+            RamFs {
+                data: MULTIBOOT_MODULES[0].contents,
+            },
+        )
+    };
 }

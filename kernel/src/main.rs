@@ -68,14 +68,14 @@ fn os_main() {
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn early_init(multiboot_info: x86_64::PhysAddr) -> InterruptGuard {
     // this runs on the boot stack
-    // you must not use normal memory allocator (Box, Vec, kernel_alloc, ...) anywhere here
-    // even after memory::init, because the memory allocator might reclaim the boot stack!
+    // you can't use memory allocation until memory::init
+    // boot memory remains allocated until we drop _reclaimer at the end of this function
 
     unsafe {
         let interrupt_guard = mach::init();
         device::early_init();
         interrupts::init();
-        memory::init(multiboot_info);
+        let _reclaimer = memory::init(multiboot_info);
         interrupt_guard
     }
 }
