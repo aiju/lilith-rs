@@ -147,7 +147,7 @@ extern "C" fn int_handler(trap_frame: &mut TrapFrame) {
         Interrupt::PageFault => page_fault_handler(&mut irq_context, Cr2::read()),
         Interrupt::Irq(0) => timer_interrupt(&mut irq_context),
         trap => {
-            panic!("Unhandled interrupt: {:#?}", trap);
+            panic!("Unhandled interrupt: {:#?}\nFrame {:?}", trap, irq_context.trap_frame);
         }
     }
     let mut interrupt_guard = irq_context.interrupt_guard;

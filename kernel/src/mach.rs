@@ -9,7 +9,7 @@ use x86_64::{
     instructions::tables::load_tss,
     registers::{
         model_specific::GsBase,
-        segmentation::{CS, DS, ES, Segment},
+        segmentation::{CS, DS, ES, SS, Segment},
     },
     structures::{
         gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
@@ -125,12 +125,15 @@ pub unsafe fn init() -> InterruptGuard {
     assert_eq!(USER_DATA_SELECTOR.0 + 8, USER_CODE_SELECTOR.0);
 
     unsafe {
-        crate::interrupts::fill_idt_tss(idt, tss);
-
         gdt.load_unsafe();
         CS::set_reg(KERNEL_CODE_SELECTOR);
         DS::set_reg(KERNEL_DATA_SELECTOR);
         ES::set_reg(KERNEL_DATA_SELECTOR);
+        SS::set_reg(KERNEL_DATA_SELECTOR);
+        
+        // x86_64 crate reads the selector out of CS when populating IDT entries, so it has to be set correctly first
+        crate::interrupts::fill_idt_tss(idt, tss);
+
         load_tss(TSS_SELECTOR);
         idt.load_unsafe();
         GsBase::write(VirtAddr::from_ptr(&*MACH0));
