@@ -1,7 +1,5 @@
 use core::slice;
 
-use include_bytes_aligned::include_bytes_aligned;
-
 use crate::{memory::MULTIBOOT_MODULES, sync::BootInit};
 
 #[repr(C)]

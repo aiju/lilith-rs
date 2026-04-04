@@ -49,12 +49,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "include_bytes_aligned"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb3f0fd7913f9257b6862075640a029db0fff0887a3f49e00059f52b7111cf11"
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -70,7 +64,6 @@ dependencies = [
  "arrayvec",
  "cc",
  "fastrand",
- "include_bytes_aligned",
  "lazy_static",
  "pic8259",
  "spin 0.10.0",
