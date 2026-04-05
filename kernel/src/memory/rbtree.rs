@@ -1,4 +1,7 @@
-use crate::prelude::*;
+use crate::{
+    memory::{MemoryError, direct_alloc_ptr},
+    prelude::*,
+};
 
 use core::{cmp::Ordering, marker::PhantomData, ptr::null_mut};
 
@@ -15,6 +18,7 @@ enum Direction {
     Right,
 }
 use Direction::*;
+use alloc::boxed::Box;
 
 impl core::ops::Not for Direction {
     type Output = Direction;
@@ -137,12 +141,32 @@ impl<T, V> RbNode<T, V> {
     }
 }
 
+pub struct RbNodeRef<'a, T, V> {
+    tree: &'a RbTree<T, V>,
+    node: *const RbNode<T, V>,
+}
+
+pub struct RbNodeMut<'a, T, V> {
+    tree: &'a mut RbTree<T, V>,
+    node: *mut RbNode<T, V>,
+}
+
+pub struct OwnedRbNode<T, V> {
+    node: *mut RbNode<T, V>,
+}
+
 pub struct RbTree<T, V> {
     head: *mut RbNode<T, V>,
 }
 
 unsafe impl<T, V> Sync for RbTree<T, V> {}
 unsafe impl<T, V> Send for RbTree<T, V> {}
+unsafe impl<T, V> Sync for RbNodeRef<'_, T, V> {}
+unsafe impl<T, V> Send for RbNodeRef<'_, T, V> {}
+unsafe impl<T, V> Sync for RbNodeMut<'_, T, V> {}
+unsafe impl<T, V> Send for RbNodeMut<'_, T, V> {}
+unsafe impl<T, V> Sync for OwnedRbNode<T, V> {}
+unsafe impl<T, V> Send for OwnedRbNode<T, V> {}
 
 fn color<T, V>(node: *mut RbNode<T, V>) -> Color {
     unsafe { if node.is_null() { Black } else { (*node).color } }
@@ -167,6 +191,7 @@ fn place<T, V>(
         (*node).color = Red;
         (*node).left = null_mut();
         (*node).right = null_mut();
+        (*node).augment = None;
 
         let mut parent = null_mut();
         let mut link = head;
@@ -197,8 +222,11 @@ impl<T, V> RbTree<T, V> {
     pub const fn new() -> Self {
         RbTree { head: null_mut() }
     }
-    pub fn head(&self) -> Option<&RbNode<T, V>> {
-        unsafe { self.head.as_ref() }
+    pub fn head(&self) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self,
+            node: unsafe { self.head.as_ref()? },
+        })
     }
 }
 
@@ -314,7 +342,7 @@ where
             (*grandparent).color = Red;
         }
     }
-    pub fn find(&self, mut eval: impl FnMut(&T, &V) -> Ordering) -> Option<*mut RbNode<T, V>> {
+    pub fn find_raw(&self, mut eval: impl FnMut(&T, &V) -> Ordering) -> Option<*mut RbNode<T, V>> {
         unsafe {
             let mut node = self.head;
             while !node.is_null() {
@@ -327,7 +355,23 @@ where
             None
         }
     }
-    pub fn lower_bound(&self, mut eval: impl FnMut(&T, &V) -> bool) -> Option<*mut RbNode<T, V>> {
+    pub fn find(&self, eval: impl FnMut(&T, &V) -> Ordering) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self,
+            node: self.find_raw(eval)?,
+        })
+    }
+    pub fn find_mut(
+        &mut self,
+        eval: impl FnMut(&T, &V) -> Ordering,
+    ) -> Option<RbNodeMut<'_, T, V>> {
+        let node = self.find_raw(eval)?;
+        Some(RbNodeMut { tree: self, node })
+    }
+    pub fn lower_bound_raw(
+        &self,
+        mut eval: impl FnMut(&T, &V) -> bool,
+    ) -> Option<*mut RbNode<T, V>> {
         unsafe {
             let mut node = self.head;
             let mut candidate = None;
@@ -342,8 +386,22 @@ where
             candidate
         }
     }
+    pub fn lower_bound(&self, eval: impl FnMut(&T, &V) -> bool) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self,
+            node: self.lower_bound_raw(eval)?,
+        })
+    }
+    pub fn lower_bound_mut(
+        &mut self,
+        eval: impl FnMut(&T, &V) -> bool,
+    ) -> Option<RbNodeMut<'_, T, V>> {
+        let node = self.lower_bound_raw(eval)?;
+        Some(RbNodeMut { tree: self, node })
+    }
     // SAFETY: node is a valid pointer. you are passing ownership to the tree
-    pub unsafe fn insert(&mut self, node: *mut RbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
+    // note that the previous value in node.augment is dropped, be careful with pointer allocation here
+    pub unsafe fn insert_raw(&mut self, node: *mut RbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
         unsafe {
             place(&raw mut self.head, node, cmp);
             mark_dirty((*node).parent);
@@ -353,6 +411,9 @@ where
             }
             self.update_augments();
         }
+    }
+    pub fn insert(&mut self, node: OwnedRbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
+        unsafe { self.insert_raw(node.into_raw(), cmp) };
     }
     // removes the node, retaining the correct order
     // returns (parent, child, removed_color) for the location where we broke red-black invariants
@@ -447,7 +508,8 @@ where
         }
     }
     // SAFETY: node is a valid pointer to a node currently in the tree
-    pub unsafe fn remove(&mut self, node: *mut RbNode<T, V>) {
+    // you might need to drop and free the memory it points to afterwards
+    pub unsafe fn remove_raw(&mut self, node: *mut RbNode<T, V>) {
         unsafe {
             let (fixup_parent, fixup_child, removed_color) = self.unplace(node);
             if removed_color == Red {
@@ -471,6 +533,73 @@ where
     }
 }
 
+impl<'a, T, V> RbNodeRef<'a, T, V> {
+    pub fn value(&self) -> &'a T {
+        unsafe { &(*self.node).value }
+    }
+    pub fn augment(&self) -> &'a V {
+        unsafe { (*self.node).augment() }
+    }
+    pub fn left(&self) -> Option<RbNodeRef<'a, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).left.as_ref()? },
+        })
+    }
+    pub fn right(&self) -> Option<RbNodeRef<'a, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).right.as_ref()? },
+        })
+    }
+    pub fn parent(&self) -> Option<RbNodeRef<'a, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).parent.as_ref()? },
+        })
+    }
+    pub fn successor(&self) -> Option<RbNodeRef<'a, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).successor()? },
+        })
+    }
+}
+
+impl<T, V: Augment<T>> RbNodeMut<'_, T, V> {
+    pub fn remove(self) -> OwnedRbNode<T, V> {
+        let RbNodeMut { tree, node } = self;
+        unsafe { tree.remove_raw(node) };
+        OwnedRbNode { node }
+    }
+}
+
+impl<T, V> OwnedRbNode<T, V> {
+    pub fn new(value: T) -> OwnedRbNode<T, V> {
+        OwnedRbNode {
+            node: Box::leak(Box::new(RbNode::new(value))),
+        }
+    }
+    // note this is safe to drop bc kernel_free handles direct allocations just fine
+    pub fn new_direct(value: T) -> Result<OwnedRbNode<T, V>, MemoryError> {
+        let node = direct_alloc_ptr()?;
+        unsafe { core::ptr::write(node, RbNode::new(value)) };
+        Ok(OwnedRbNode { node })
+    }
+    pub fn into_raw(self) -> *mut RbNode<T, V> {
+        self.node
+    }
+    pub fn into_value(self) -> T {
+        unsafe { Box::from_raw(self.node) }.value
+    }
+}
+
+impl<T, V> Drop for OwnedRbNode<T, V> {
+    fn drop(&mut self) {
+        unsafe { drop(Box::from_raw(self.node)) };
+    }
+}
+
 impl<T, V: Augment<T> + Eq + core::fmt::Debug> RbTree<T, V> {
     pub fn check(&self, cmp: impl Fn(&T, &T) -> Ordering) {
         crate::memory::rbtree::tests::tree_check(self.head, null_mut(), None, None, &cmp);
@@ -478,7 +607,7 @@ impl<T, V: Augment<T> + Eq + core::fmt::Debug> RbTree<T, V> {
 }
 
 impl<T, V> RbTree<T, V> {
-    pub fn lowest_node(&self) -> Option<*mut RbNode<T, V>> {
+    pub fn lowest_node_raw(&self) -> Option<*mut RbNode<T, V>> {
         let mut node = self.head;
         unsafe {
             if !node.is_null() {
@@ -491,9 +620,15 @@ impl<T, V> RbTree<T, V> {
             }
         }
     }
+    pub fn lowest_node(&self) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self,
+            node: self.lowest_node_raw()?,
+        })
+    }
     pub fn iter(&self) -> RbTreeIterator<'_, T, V> {
         RbTreeIterator {
-            node: self.lowest_node().unwrap_or_default(),
+            node: self.lowest_node_raw().unwrap_or_default(),
             _phantom: PhantomData::default(),
         }
     }
@@ -639,9 +774,7 @@ mod tests {
         for _ in 0..10 {
             let mut tree: RbTree<i32, Sum> = RbTree { head: null_mut() };
             for _ in 0..1000 {
-                let node: *mut RbNode<i32, Sum> = kernel_alloc_ptr();
-                unsafe { (*node).value = rng.i32(0..100) };
-                unsafe { tree.insert(node, Ord::cmp) };
+                tree.insert(OwnedRbNode::new(rng.i32(0..100)), Ord::cmp);
                 //print_tree(tree.head, 0);
                 //serial_println!("---");
                 tree_check(tree.head, null_mut(), None, None, &Ord::cmp);
@@ -655,13 +788,11 @@ mod tests {
         for _ in 0..10 {
             let mut tree: RbTree<i32, Sum> = RbTree { head: null_mut() };
             for _ in 0..1000 {
-                let node: *mut RbNode<i32, Sum> = kernel_alloc_ptr();
-                unsafe { (*node).value = rng.i32(0..100) };
-                unsafe { tree.insert(node, Ord::cmp) };
+                tree.insert(OwnedRbNode::new(rng.i32(0..100)), Ord::cmp);
             }
             while !tree.head.is_null() {
                 let node = pick_random(&mut rng, tree.head);
-                unsafe { tree.remove(node) };
+                unsafe { tree.remove_raw(node) };
                 //print_tree(tree.head, 0);
                 //serial_println!("---");
                 tree_check(tree.head, null_mut(), None, None, &Ord::cmp);

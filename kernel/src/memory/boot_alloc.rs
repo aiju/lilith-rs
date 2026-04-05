@@ -1,9 +1,8 @@
 use crate::memory::buddy::buddy_add_range;
-use crate::memory::rbtree::{Augment, RbNode, RbTree};
+use crate::memory::rbtree::{Augment, RbNode, RbNodeRef, RbTree};
 #[allow(unused_imports)]
 use crate::prelude::*;
 use core::fmt::Debug;
-use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::{alloc::Layout, ops::Range};
 use x86_64::PhysAddr;
@@ -90,13 +89,13 @@ impl BootAlloc {
             self.free_node = *(node as *mut *mut NodeSlot);
             (*node).write(RbNode::new(span));
             self.tree
-                .insert((*node).assume_init_mut(), |a, b| a.start.cmp(&b.start));
+                .insert_raw((*node).assume_init_mut(), |a, b| a.start.cmp(&b.start));
         }
     }
     fn remove(&mut self, node: *mut RbNode<Span, MaxFree>) -> Span {
         unsafe {
             let result = *(*node).value();
-            self.tree.remove(node);
+            self.tree.remove_raw(node);
             *(node as *mut *mut NodeSlot) = self.free_node;
             self.free_node = node as *mut NodeSlot;
             result
@@ -112,7 +111,7 @@ impl BootAlloc {
             let end = addr + len;
             while addr != end {
                 // can do slightly better by walking from node to successor instead of looping lower_bound
-                let Some(node) = self.tree.lower_bound(|n, _| n.end > addr) else {
+                let Some(node) = self.tree.lower_bound_raw(|n, _| n.end > addr) else {
                     break;
                 };
                 if (*node).value().start >= end {
@@ -173,36 +172,35 @@ impl BootAlloc {
             _ => SpanType::Reclaimable,
         });
     }
-    fn alloc_worker(&mut self, layout: Layout, node: *mut RbNode<Span, MaxFree>) -> Option<u64> {
-        unsafe {
-            if let Some(left) = (*node).left() {
-                if left.augment().0 >= layout.size() as u64 {
-                    if let Some(result) = self.alloc_worker(layout, left as *const _ as *mut _) {
-                        return Some(result);
-                    }
+    // TODO: can be done non-recursively maybe ?
+    fn alloc_worker(layout: Layout, node: RbNodeRef<Span, MaxFree>) -> Option<u64> {
+        if let Some(left) = node.left() {
+            if left.augment().0 >= layout.size() as u64 {
+                if let Some(result) = Self::alloc_worker(layout, left) {
+                    return Some(result);
                 }
             }
-            let span = (*node).value();
-            if span.span_type == SpanType::Free {
-                let start = span.start.next_multiple_of(layout.align() as u64);
-                let available = span.end.saturating_sub(start);
-                if available >= layout.size() as u64 {
-                    return Some(start);
-                }
-            }
-            if let Some(right) = (*node).right() {
-                if right.augment().0 >= layout.size() as u64 {
-                    if let Some(result) = self.alloc_worker(layout, right as *const _ as *mut _) {
-                        return Some(result);
-                    }
-                }
-            }
-            None
         }
+        let span = node.value();
+        if span.span_type == SpanType::Free {
+            let start = span.start.next_multiple_of(layout.align() as u64);
+            let available = span.end.saturating_sub(start);
+            if available >= layout.size() as u64 {
+                return Some(start);
+            }
+        }
+        if let Some(right) = node.right() {
+            if right.augment().0 >= layout.size() as u64 {
+                if let Some(result) = Self::alloc_worker(layout, right) {
+                    return Some(result);
+                }
+            }
+        }
+        None
     }
     pub fn alloc(&mut self, layout: Layout) -> Option<PhysAddr> {
         let layout = layout.align_to(4096).unwrap().pad_to_align();
-        let start = self.alloc_worker(layout, self.tree.head()? as *const _ as *mut _)?;
+        let start = Self::alloc_worker(layout, self.tree.head()?)?;
         self.update(start, layout.size() as u64, |t| {
             assert!(t == Some(SpanType::Free));
             SpanType::InUse
@@ -211,17 +209,12 @@ impl BootAlloc {
     }
     pub fn reclaimable_range_iter(&self) -> ReclaimableRangeIter<'_> {
         ReclaimableRangeIter {
-            node: self
-                .tree
-                .lowest_node()
-                .map(|r| r as *const _ as *mut _)
-                .unwrap_or_default(),
-            _phantom: PhantomData,
+            node: self.tree.lowest_node(),
         }
     }
     pub fn compact(&mut self) {
         unsafe {
-            let Some(mut node) = self.tree.lowest_node() else {
+            let Some(mut node) = self.tree.lowest_node_raw() else {
                 return;
             };
             while let Some(succ) = (*node).successor() {
@@ -231,7 +224,7 @@ impl BootAlloc {
                     let start = (*node).value().start;
                     let end = (*succ).value().end;
                     let span_type = (*node).value().span_type;
-                    self.tree.remove(node); // don't reinsert node back into freelist, reuse it
+                    self.tree.remove_raw(node); // don't reinsert node back into freelist, reuse it
                     self.remove(succ); // return succ to freelist
                     core::ptr::write(
                         node,
@@ -241,7 +234,7 @@ impl BootAlloc {
                             span_type,
                         }),
                     );
-                    self.tree.insert(node, |a, b| a.start.cmp(&b.start));
+                    self.tree.insert_raw(node, |a, b| a.start.cmp(&b.start));
                     continue;
                 }
                 node = succ;
@@ -253,7 +246,7 @@ impl BootAlloc {
         unsafe {
             self.compact();
             let mut addr = 0;
-            while let Some(node) = self.tree.lower_bound(|s, _| s.start >= addr) {
+            while let Some(node) = self.tree.lower_bound_raw(|s, _| s.start >= addr) {
                 let span = *(*node).value();
                 if span.span_type == SpanType::Free {
                     let start = PhysAddr::new_unsafe(span.start).align_up(4096u64);
@@ -289,8 +282,7 @@ impl BootAlloc {
 }
 
 pub struct ReclaimableRangeIter<'a> {
-    node: *mut RbNode<Span, MaxFree>,
-    _phantom: PhantomData<&'a Span>,
+    node: Option<RbNodeRef<'a, Span, MaxFree>>,
 }
 
 impl Iterator for ReclaimableRangeIter<'_> {
@@ -299,21 +291,24 @@ impl Iterator for ReclaimableRangeIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
             loop {
-                while !self.node.is_null() && !(*self.node).value().span_type.is_usable() {
-                    self.node = (*self.node).successor().unwrap_or_default();
+                while let Some(ref node) = self.node {
+                    if node.value().span_type.is_usable() {
+                        break;
+                    }
+                    self.node = node.successor()
                 }
-                if self.node.is_null() {
+                let Some(ref node) = self.node else {
                     return None;
-                }
-                let start_addr = (*self.node).value().start;
-                let mut end_addr = (*self.node).value().end;
-                let mut succ = (*self.node).successor().unwrap_or_default();
-                while !succ.is_null()
-                    && (*succ).value().start == end_addr
-                    && (*succ).value().span_type.is_usable()
-                {
-                    end_addr = (*succ).value().end;
-                    succ = (*succ).successor().unwrap_or_default();
+                };
+                let start_addr = node.value().start;
+                let mut end_addr = node.value().end;
+                let mut succ = node.successor();
+                while let Some(ref s) = succ {
+                    if s.value().start != end_addr || !s.value().span_type.is_usable() {
+                        break;
+                    }
+                    end_addr = s.value().end;
+                    succ = s.successor();
                 }
                 self.node = succ;
                 let s = PhysAddr::new_unsafe(start_addr).align_up(4096u64);

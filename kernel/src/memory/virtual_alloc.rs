@@ -9,8 +9,7 @@ use crate::{
     memory::{
         FRAME_SIZE, MemoryError,
         address_space::KERNEL_ADDRESS_SPACE,
-        direct_alloc_ptr, kernel_free,
-        rbtree::{Augment, RbNode, RbTree},
+        rbtree::{Augment, OwnedRbNode, RbTree},
     },
     sync::IrqLock,
 };
@@ -80,6 +79,24 @@ impl<A, V> SpanAlloc<A, V> {
     }
 }
 
+fn node_cmp<A: Address, V>(x: &Span<A, V>, y: &Span<A, V>) -> core::cmp::Ordering {
+    A::cmp(&x.start, &y.start)
+}
+
+fn by_containing<A: Address, V>(
+    addr: A,
+) -> impl FnMut(&Span<A, V>, &MaxGap<A>) -> core::cmp::Ordering {
+    move |span, _| {
+        if addr < span.start {
+            core::cmp::Ordering::Greater
+        } else if addr >= span.end {
+            core::cmp::Ordering::Less
+        } else {
+            core::cmp::Ordering::Equal
+        }
+    }
+}
+
 impl<A: Address, V> SpanAlloc<A, V> {
     fn find_gap(&self, size: A) -> Option<Range<A>> {
         let Some(mut node) = self.spans.head() else {
@@ -131,43 +148,29 @@ impl<A: Address, V> SpanAlloc<A, V> {
             end: range.end,
             value,
         };
-        // TODO: maybe alloc + write should be a utility function ?
-        let node = direct_alloc_ptr().map_err(SpanError::Memory)?;
-        unsafe { core::ptr::write(node, RbNode::new(span)) };
-        unsafe { self.spans.insert(node, |x, y| A::cmp(&x.start, &y.start)) };
+        let node = OwnedRbNode::new_direct(span).map_err(SpanError::Memory)?;
+        self.spans.insert(node, node_cmp);
         Ok(range)
     }
-    fn node_containing(&self, addr: A) -> Option<*mut RbNode<Span<A, V>, MaxGap<A>>> {
-        self.spans.find(|span, _| {
-            if addr < span.start {
-                core::cmp::Ordering::Greater
-            } else if addr >= span.end {
-                core::cmp::Ordering::Less
-            } else {
-                core::cmp::Ordering::Equal
-            }
-        })
-    }
     pub fn span_containing(&self, addr: A) -> Option<&V> {
-        self.node_containing(addr)
-            .map(|x| unsafe { &(*x).value().value })
+        self.spans
+            .find(by_containing(addr))
+            .map(|x| &x.value().value)
     }
     pub unsafe fn free(&mut self, addr: A) -> (Range<A>, V) {
-        let node = self
-            .node_containing(addr)
-            .expect("free with pointer not virtual_alloc'd");
-        unsafe {
-            self.spans.remove(node);
-            let span = core::ptr::read(node).into_value();
-            kernel_free(VirtAddr::from_ptr(node));
-            (span.start..span.end, span.value)
-        }
+        let span = self
+            .spans
+            .find_mut(by_containing(addr))
+            .expect("free with pointer not virtual_alloc'd")
+            .remove()
+            .into_value();
+        (span.start..span.end, span.value)
     }
 }
 
 impl<A: Address + core::fmt::Debug, V> SpanAlloc<A, V> {
     fn check(&self) {
-        self.spans.check(|x, y| A::cmp(&x.start, &y.start));
+        self.spans.check(node_cmp);
     }
 }
 
@@ -302,9 +305,12 @@ fn test_virtual_alloc() {
     let n = 2 * 1024 * 1024;
     let sp: &mut [AtomicU32] = unsafe {
         core::slice::from_raw_parts_mut(
-            va.alloc(Layout::from_size_align(n * 4, 4096).unwrap(), Default::default())
-                .unwrap()
-                .as_mut_ptr(),
+            va.alloc(
+                Layout::from_size_align(n * 4, 4096).unwrap(),
+                Default::default(),
+            )
+            .unwrap()
+            .as_mut_ptr(),
             n,
         )
     };

@@ -39,6 +39,5 @@ pub unsafe fn early_init() {
     unsafe {
         serial::init();
         vga::init();
-        println!("hello, world");
     }
 }

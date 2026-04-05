@@ -142,13 +142,14 @@ impl Bootstrap<'_> {
             }
 
             // map kernel text / data / bss
+            // TODO: mark rodata non-executable ?
             self.copy_mapping_4kib(text_start(), data_start(), flags_code);
             self.copy_mapping_4kib(data_start(), bss_end(), flags_rwdata);
 
             // allocate and map pages for FrameInfo structs
             let mut addr = 0;
             while let Some(node) = self.boot_alloc.tree().lower_bound(|s, _| s.start >= addr) {
-                let span = *(*node).value();
+                let span = node.value().clone();
                 if span.span_type.needs_frameinfo() {
                     let fi_start =
                         frame_info_addr(PhysAddr::new_unsafe(span.start).align_down(4096u64))
