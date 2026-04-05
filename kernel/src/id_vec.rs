@@ -68,9 +68,9 @@ where
             id
         }
     }
-    pub fn remove(&mut self, index: I) {
+    pub fn remove(&mut self, index: I) -> T {
         let old = self.list.get_mut(index.into()).unwrap().take();
-        assert!(old.is_some());
         self.free.push_back(index);
+        old.unwrap()
     }
 }

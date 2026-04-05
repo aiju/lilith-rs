@@ -29,8 +29,7 @@ use crate::util::clog2;
 
 pub const PHYSICAL_MEMORY_OFFSET: VirtAddr = VirtAddr::new_truncate(0xFFFF_8000_0000_0000);
 pub const PHYSICAL_MEMORY_MAX_SIZE: usize = 4 * 1024 * 1024 * 1024 * 1024;
-pub const KERNEL_STACK_TOP: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFF_A000_0000); // needs to match boot.s
-pub const KERNEL_STACK_SIZE: usize = 255 * 4096;
+pub const KERNEL_STACK_SIZE: usize = 256 * 4096;
 
 pub const FRAME_LAYOUT: Layout =
     unsafe { Layout::from_size_align_unchecked(FRAME_SIZE, FRAME_SIZE) };
@@ -85,7 +84,7 @@ pub fn direct_alloc_ptr<T>() -> Result<*mut T, MemoryError> {
 }
 
 pub fn kernel_alloc(layout: Layout) -> Result<VirtAddr, MemoryError> {
-    direct_alloc(layout).or_else(|_| VIRTUAL_ALLOCATOR.lock().alloc(layout))
+    direct_alloc(layout).or_else(|_| VIRTUAL_ALLOCATOR.lock().alloc(layout, Default::default()))
 }
 
 pub fn alloc_frame() -> Result<PhysAddr, MemoryError> {
@@ -139,5 +138,32 @@ unsafe impl core::alloc::GlobalAlloc for GlobalAlloc {
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
         unsafe { kernel_free(VirtAddr::from_ptr(ptr)) }
+    }
+}
+
+#[repr(transparent)] // boot.S relies on the layout
+pub struct Stack {
+    top: VirtAddr,
+}
+
+impl Stack {
+    pub fn new() -> Result<Stack, MemoryError> {
+        let bottom = VIRTUAL_ALLOCATOR.lock().alloc(
+            Layout::from_size_align(KERNEL_STACK_SIZE, FRAME_SIZE).unwrap(),
+            virtual_alloc::AllocSettings {
+                guard_bottom: FRAME_SIZE,
+                guard_top: FRAME_SIZE,
+            },
+        )?;
+        Ok(Stack { top: bottom + KERNEL_STACK_SIZE } )
+    }
+    pub fn size(&self) -> usize { KERNEL_STACK_SIZE }
+    pub fn top(&self) -> VirtAddr { self.top }
+    pub fn bottom(&self) -> VirtAddr { self.top - KERNEL_STACK_SIZE }
+}
+
+impl Drop for Stack {
+    fn drop(&mut self) {
+        unsafe { VIRTUAL_ALLOCATOR.lock().free(self.bottom()) };
     }
 }

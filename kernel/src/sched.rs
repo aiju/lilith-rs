@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-use core::{alloc::Layout, arch::naked_asm, sync::atomic::Ordering};
+use core::{arch::naked_asm, sync::atomic::Ordering};
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use x86_64::VirtAddr;
@@ -11,7 +11,7 @@ use crate::{
     id_vec::IdSparseVec,
     interrupts::{IrqContext, PICS, TICK_NS},
     mach::mach,
-    memory::{FRAME_SIZE, KERNEL_STACK_SIZE, KERNEL_STACK_TOP, direct_alloc, kernel_free},
+    memory::Stack,
     sync::{IrqLock, IrqLockGuard},
     user::Proc,
 };
@@ -54,8 +54,7 @@ struct SwitchFrame {
 }
 
 pub struct SchedThread {
-    stack: VirtAddr,
-    stack_size: usize,
+    stack: Stack,
     regs: SwitchFrame,
     proc: Option<Arc<Proc>>,
     state: ThreadState,
@@ -84,11 +83,10 @@ impl Scheduler {
         self.threads.get_mut(mach().current_thread_id()).unwrap()
     }
     fn spawn_inner(&mut self, fun: fn(*const ()), data: *const (), size: usize, align: usize) {
-        let stack_size = 16384;
-        let stack = direct_alloc(Layout::from_size_align(stack_size, FRAME_SIZE).unwrap()).unwrap();
-        let mut rsp = (stack + stack_size - size).align_down(align as u64);
+        let stack = Stack::new().unwrap();
+        let mut rsp = (stack.top() - size).align_down(align as u64);
         rsp = rsp.align_down(16u64); // SysV ABI requires 16-byte stack alignment
-        assert!(rsp >= stack + MIN_STACK);
+        assert!(rsp >= stack.bottom() + MIN_STACK);
         unsafe { core::ptr::copy_nonoverlapping(data as *const u8, rsp.as_mut_ptr(), size) };
         let regs = SwitchFrame {
             rip: thread_entry_stub as *const () as u64,
@@ -98,7 +96,6 @@ impl Scheduler {
         };
         let id = self.threads.insert(SchedThread {
             stack,
-            stack_size,
             regs,
             proc: None,
             state: ThreadState::Ready,
@@ -124,7 +121,6 @@ impl Scheduler {
     fn clean_up(&mut self, id: ThreadId) {
         let thread = self.threads.get_mut(id).unwrap();
         assert_eq!(thread.state, ThreadState::Exiting);
-        unsafe { kernel_free(thread.stack) };
         self.threads.remove(id);
     }
     fn wake(&mut self, id: ThreadId) {
@@ -323,10 +319,9 @@ pub fn thread_yield() {
     sched(SCHEDULER.lock(), SchedReason::Yielding);
 }
 
-pub unsafe fn init() {
+pub unsafe fn init(kernel_stack: Stack) {
     let id = SCHEDULER.lock().threads.insert(SchedThread {
-        stack: KERNEL_STACK_TOP - KERNEL_STACK_SIZE,
-        stack_size: KERNEL_STACK_SIZE,
+        stack: kernel_stack,
         proc: None,
         regs: SwitchFrame::default(),
         state: ThreadState::Running,
@@ -452,8 +447,10 @@ impl WaitQueue {
     }
 }
 
+// TODO: feels like we can return some kind of magic reference here ?
+// e.g. return StackRef that's not Send or something
 pub fn thread_stack() -> (VirtAddr, VirtAddr) {
     let scheduler = SCHEDULER.lock();
     let thread = scheduler.threads.get(mach().current_thread_id()).unwrap();
-    (thread.stack, thread.stack + thread.stack_size)
+    (thread.stack.bottom(), thread.stack.top())
 }

@@ -24,9 +24,9 @@ use x86_64::{
 
 use crate::memory::buddy::{buddy_add_range, buddy_init};
 use crate::memory::slub::slub_init;
-use crate::memory::{FRAME_LAYOUT, MULTIBOOT_MODULES, MultibootModule};
+use crate::memory::{FRAME_LAYOUT, MULTIBOOT_MODULES, MultibootModule, Stack};
 use crate::memory::{
-    KERNEL_STACK_SIZE, KERNEL_STACK_TOP, PHYSICAL_MEMORY_MAX_SIZE, PHYSICAL_MEMORY_OFFSET,
+    PHYSICAL_MEMORY_MAX_SIZE, PHYSICAL_MEMORY_OFFSET,
     frame_info::{FrameInfo, frame_info_addr},
     phys_to_mut, phys_to_virt,
 };
@@ -145,11 +145,6 @@ impl Bootstrap<'_> {
             self.copy_mapping_4kib(text_start(), data_start(), flags_code);
             self.copy_mapping_4kib(data_start(), bss_end(), flags_rwdata);
 
-            // allocate a new kernel stack
-            for addr in (KERNEL_STACK_TOP - KERNEL_STACK_SIZE..KERNEL_STACK_TOP).step_by(4096) {
-                self.ensure_allocated(addr);
-            }
-
             // allocate and map pages for FrameInfo structs
             let mut addr = 0;
             while let Some(node) = self.boot_alloc.tree().lower_bound(|s, _| s.start >= addr) {
@@ -217,7 +212,7 @@ fn grab_modules(multiboot_info: &MultibootInfoRaw) -> Vec<MultibootModule> {
 #[unsafe(link_section = ".boot_reclaimable")]
 static mut SPANS: [NodeSlot; 128] = [const { MaybeUninit::uninit() }; 128];
 
-pub unsafe fn init(multiboot_info_addr: PhysAddr) -> Reclaimer {
+pub unsafe fn init(multiboot_info_addr: PhysAddr) -> (Reclaimer, Stack) {
     unsafe {
         let multiboot_info: &MultibootInfoRaw = &*phys_to_virt(multiboot_info_addr).as_ptr();
         #[allow(static_mut_refs)]
@@ -286,7 +281,9 @@ pub unsafe fn init(multiboot_info_addr: PhysAddr) -> Reclaimer {
 
         BootInit::set(&MULTIBOOT_MODULES, grab_modules(multiboot_info));
 
-        Reclaimer { boot_alloc }
+        let kernel_stack = Stack::new().unwrap();
+
+        (Reclaimer { boot_alloc }, kernel_stack)
     }
 }
 

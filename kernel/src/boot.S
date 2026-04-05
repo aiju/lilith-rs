@@ -165,7 +165,8 @@ _start64:
     mov rsp, offset boot_stack_top
     mov edi, multiboot_info_ptr
     call early_init
-    mov rsp, 0xFFFFFFFFA0000000
+    mov rsp, rax
+    mov rdi, rax
     call main
     // call for stack alignment -- should never return
 

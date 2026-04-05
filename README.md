@@ -7,9 +7,8 @@ Memory map
 ```
 0xFFFF_8000_0000_0000 - ...                      Physical memory is mapped 1:1 here (direct map)
 0xFFFF_9000_0000_0000 - ...                      Frame info tables are mapped here
-0xFFFF_A000_0000_0000 - ...                      Virtual allocations happen here
+0xFFFF_A000_0000_0000 - ...                      Virtual allocations (including kernel stacks) happen here
 0xFFFF_FFFF_8000_0000 - 0xFFFF_FFFF_9000_0000    Kernel code/data/bss
-0xFFFF_FFFF_9FF0_0000 - 0xFFFF_FFFF_A000_0000    Kernel stack
 ```
 
 Heap allocations happen in three different ways:
@@ -19,6 +18,17 @@ Heap allocations happen in three different ways:
 2. Allocations smaller than this are allocated by taking a page from the buddy allocator and cutting it up into pieces of various fixed sizes, e.g. 64 bytes (SLUB allocator).
 
 3. Allocations larger than 4 MB are allocated by assigning virtual address space in the virtual allocation region and backing that with 4 KB pages.
+
+Linker segments
+-------------------
+```
+.text / .rodata / .data / .bss       serve their normal function, loaded around 0x100000 in physical memory, mapped high
+.boot                                used during boot, starts at 0x100000 and is identity-mapped during boot
+.real_mode_text                      copied into the first 64 KB, also includes data, used during boot to do BIOS calls
+.real_mode_bss                       allocated in the first 64 KB, *NOT* zeroed
+.boot_reclaimable                    like .bss but the memory is returned to the allocator once early_init exits
+.boot_reclaimable_phys               ditto but identity-mapped like .boot
+```
 
 Compilation requirements
 ----------------------

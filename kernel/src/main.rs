@@ -32,7 +32,6 @@ use alloc::sync::Arc;
 use crate::{
     ramfs::ram_fs,
     sched::thread_spawn,
-    sync::InterruptGuard,
     tasks::{task_sleep, task_spawn},
     user::Proc,
 };
@@ -65,8 +64,7 @@ fn os_main() {
 }
 
 #[unsafe(no_mangle)]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn early_init(multiboot_info: x86_64::PhysAddr) -> InterruptGuard {
+pub extern "C" fn early_init(multiboot_info: x86_64::PhysAddr) -> memory::Stack {
     // this runs on the boot stack
     // you can't use memory allocation until memory::init
     // boot memory remains allocated until we drop _reclaimer at the end of this function
@@ -75,18 +73,20 @@ pub extern "C" fn early_init(multiboot_info: x86_64::PhysAddr) -> InterruptGuard
         let interrupt_guard = mach::init();
         device::early_init();
         interrupts::init();
-        let _reclaimer = memory::init(multiboot_info);
-        interrupt_guard
+        let (_reclaimer, kernel_stack) = memory::init(multiboot_info);
+        interrupt_guard.drop_without_disabling(); // leave interrupts off for now
+        kernel_stack
     }
 }
 
-// we pass the InterruptGuard from early_init to main via magic -- it's a ZST so the assembly stub doesnt have to do anything
-
 #[unsafe(no_mangle)]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn main(interrupt_guard: InterruptGuard) -> ! {
+pub extern "C" fn main(kernel_stack: memory::Stack) -> ! {
+    // this runs on kernel_stack, ownership of which we pass to the scheduler
+    
+    let interrupt_guard = sync::interrupt_guard();
+
     unsafe {
-        sched::init();
+        sched::init(kernel_stack);
         tasks::init();
         ramfs::init();
         drop(interrupt_guard);

@@ -137,23 +137,24 @@ impl<A: Address, V> SpanAlloc<A, V> {
         unsafe { self.spans.insert(node, |x, y| A::cmp(&x.start, &y.start)) };
         Ok(range)
     }
+    fn node_containing(&self, addr: A) -> Option<*mut RbNode<Span<A, V>, MaxGap<A>>> {
+        self.spans.find(|span, _| {
+            if addr < span.start {
+                core::cmp::Ordering::Greater
+            } else if addr >= span.end {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+    }
     pub fn span_containing(&self, addr: A) -> Option<&V> {
-        self.spans
-            .find(|span, _| {
-                if addr < span.start {
-                    core::cmp::Ordering::Greater
-                } else if addr >= span.end {
-                    core::cmp::Ordering::Less
-                } else {
-                    core::cmp::Ordering::Equal
-                }
-            })
+        self.node_containing(addr)
             .map(|x| unsafe { &(*x).value().value })
     }
     pub unsafe fn free(&mut self, addr: A) -> (Range<A>, V) {
         let node = self
-            .spans
-            .find(|vmap, _| vmap.start.cmp(&addr))
+            .node_containing(addr)
             .expect("free with pointer not virtual_alloc'd");
         unsafe {
             self.spans.remove(node);
@@ -170,11 +171,22 @@ impl<A: Address + core::fmt::Debug, V> SpanAlloc<A, V> {
     }
 }
 
+pub struct VirtualAllocation {
+    guard_bottom: usize,
+    guard_top: usize,
+}
+
 pub struct VirtualAllocator {
-    spans: SpanAlloc<u64, ()>,
+    spans: SpanAlloc<u64, VirtualAllocation>,
 }
 
 pub static VIRTUAL_ALLOCATOR: IrqLock<VirtualAllocator> = IrqLock::new(VirtualAllocator::new());
+
+#[derive(Clone, Copy, Default)]
+pub struct AllocSettings {
+    pub guard_bottom: usize,
+    pub guard_top: usize,
+}
 
 impl VirtualAllocator {
     fn err_map(err: SpanError) -> MemoryError {
@@ -205,12 +217,26 @@ impl VirtualAllocator {
             unsafe { kernel_as.unmap_page(VirtAddr::new_unsafe(addr)) };
         }
     }
-    pub fn alloc(&mut self, layout: Layout) -> Result<VirtAddr, MemoryError> {
+    pub fn alloc(
+        &mut self,
+        layout: Layout,
+        settings: AllocSettings,
+    ) -> Result<VirtAddr, MemoryError> {
+        let guard_bottom = settings.guard_bottom.next_multiple_of(FRAME_SIZE);
+        let guard_top = settings.guard_top.next_multiple_of(FRAME_SIZE);
         let layout = layout.align_to(FRAME_SIZE).unwrap().pad_to_align();
-        let range = self
+        assert!(layout.align() <= 4096);
+        let total_size = layout.size() + guard_bottom + guard_top;
+        let allocation = VirtualAllocation {
+            guard_bottom,
+            guard_top,
+        };
+        let total_range = self
             .spans
-            .alloc(layout.size() as u64, ())
+            .alloc(total_size as u64, allocation)
             .map_err(Self::err_map)?;
+        let range = total_range.start + settings.guard_bottom as u64
+            ..total_range.end - settings.guard_top as u64;
         match Self::try_map_pages(range.clone()) {
             Ok(()) => Ok(unsafe { VirtAddr::new_unsafe(range.start) }),
             Err((done_range, err)) => {
@@ -221,7 +247,10 @@ impl VirtualAllocator {
         }
     }
     pub unsafe fn free(&mut self, addr: VirtAddr) {
-        let (range, _) = unsafe { self.spans.free(addr.as_u64()) };
+        let (total_range, allocation) = unsafe { self.spans.free(addr.as_u64()) };
+        let range = total_range.start + allocation.guard_bottom as u64
+            ..total_range.end - allocation.guard_top as u64;
+        assert_eq!(addr.as_u64(), range.start);
         let mut kernel_as = KERNEL_ADDRESS_SPACE.lock();
         for addr in range.clone().step_by(FRAME_SIZE) {
             unsafe { kernel_as.unmap_page(VirtAddr::new_unsafe(addr)) };
@@ -273,7 +302,7 @@ fn test_virtual_alloc() {
     let n = 2 * 1024 * 1024;
     let sp: &mut [AtomicU32] = unsafe {
         core::slice::from_raw_parts_mut(
-            va.alloc(Layout::from_size_align(n * 4, 4096).unwrap())
+            va.alloc(Layout::from_size_align(n * 4, 4096).unwrap(), Default::default())
                 .unwrap()
                 .as_mut_ptr(),
             n,
