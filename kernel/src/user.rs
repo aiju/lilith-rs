@@ -70,7 +70,7 @@ impl ActiveProc {
                     proc.memory
                         .lock()
                         .address_space
-                        .add_mapping(va, h.mem_size() as usize);
+                        .add_mapping(va..va + h.mem_size() as usize);
                     let Ok(SegmentData::Undefined(data)) = h.get_data(&elf) else {
                         panic!("elf parsing error")
                     };
@@ -86,10 +86,9 @@ impl ActiveProc {
                 Err(str) => panic!("load_elf: {str}"),
             }
         }
-        proc.memory
-            .lock()
-            .address_space
-            .add_mapping(VirtAddr::new(USER_STACK_BOTTOM), USER_STACK_SIZE);
+        proc.memory.lock().address_space.add_mapping(
+            VirtAddr::new(USER_STACK_BOTTOM)..VirtAddr::new(USER_STACK_BOTTOM) + USER_STACK_SIZE,
+        );
         elf.header.pt2.entry_point()
     }
 

@@ -68,10 +68,12 @@ pub struct SpanAlloc<A, V> {
 pub enum SpanError {
     Memory(MemoryError),
     Exhausted,
+    InvalidAddress,
+    Overlapped,
 }
 
 impl<A, V> SpanAlloc<A, V> {
-    const fn new(range: Range<A>) -> Self {
+    pub const fn new(range: Range<A>) -> Self {
         SpanAlloc {
             spans: RbTree::new(),
             range,
@@ -140,6 +142,30 @@ impl<A: Address, V> SpanAlloc<A, V> {
             return None;
         }
     }
+    pub fn insert(&mut self, range: Range<A>, value: V) -> Result<(), SpanError> {
+        if self.range.start < self.range.start || self.range.end > self.range.end {
+            return Err(SpanError::InvalidAddress);
+        }
+        if self
+            .spans
+            .find(|span, _| {
+                if span.end <= range.start {
+                    core::cmp::Ordering::Less
+                } else if span.start >= range.end {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Equal
+                }
+            })
+            .is_some()
+        {
+            return Err(SpanError::Overlapped);
+        }
+        let span = Span { start: range.start, end: range.end, value };
+        let node = OwnedRbNode::new_direct(span).map_err(SpanError::Memory)?;
+        self.spans.insert(node, node_cmp);
+        Ok(())
+    }
     pub fn alloc(&mut self, size: A, value: V) -> Result<Range<A>, SpanError> {
         let gap = self.find_gap(size).ok_or(SpanError::Exhausted)?;
         let range = gap.start..gap.start + size;
@@ -196,6 +222,7 @@ impl VirtualAllocator {
         match err {
             SpanError::Memory(memory_error) => memory_error,
             SpanError::Exhausted => MemoryError::OutOfVirtual,
+            SpanError::Overlapped | SpanError::InvalidAddress => unreachable!(),
         }
     }
     pub const fn new() -> Self {

@@ -587,7 +587,9 @@ impl<T, V> OwnedRbNode<T, V> {
         Ok(OwnedRbNode { node })
     }
     pub fn into_raw(self) -> *mut RbNode<T, V> {
-        self.node
+        let node = self.node;
+        core::mem::forget(self);
+        node
     }
     pub fn into_value(self) -> T {
         unsafe { Box::from_raw(self.node) }.value

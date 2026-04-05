@@ -3,7 +3,6 @@ use x86_64::PhysAddr;
 use crate::{
     device,
     memory::phys_to_virt,
-    println,
     sync::{BootInit, IrqLock},
 };
 

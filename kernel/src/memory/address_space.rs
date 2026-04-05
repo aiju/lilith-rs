@@ -1,4 +1,5 @@
-use alloc::vec::Vec;
+use core::ops::Range;
+
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
@@ -9,7 +10,7 @@ use x86_64::{
 
 use crate::{
     interrupts::IrqContext, mach::mach, memory::{
-        MemoryError, PHYSICAL_MEMORY_OFFSET, alloc_frame, frame_info::FRAME_SIZE, is_user_address, kernel_free, phys_to_virt, virt_to_phys, zero_frame
+        MemoryError, PHYSICAL_MEMORY_OFFSET, alloc_frame, frame_info::FRAME_SIZE, is_user_address, kernel_free, phys_to_virt, virt_to_phys, virtual_alloc::SpanAlloc, zero_frame
     }, println, sync::{BootInit, IrqLock}
 };
 
@@ -72,13 +73,11 @@ impl KernelAddressSpace {
 }
 
 pub struct Mapping {
-    addr: VirtAddr,
-    size: usize,
 }
 
 pub struct UserAddressSpace {
     page_table: VirtAddr,
-    mappings: Vec<Mapping>,
+    mappings: SpanAlloc<u64, Mapping>,
 }
 
 impl UserAddressSpace {
@@ -95,7 +94,7 @@ impl UserAddressSpace {
         }
         Ok(UserAddressSpace {
             page_table: addr,
-            mappings: Vec::new(),
+            mappings: SpanAlloc::new(0..(1u64<<48)),
         })
     }
 
@@ -103,8 +102,8 @@ impl UserAddressSpace {
         virt_to_phys(self.page_table).unwrap()
     }
 
-    pub fn add_mapping(&mut self, addr: VirtAddr, size: usize) {
-        self.mappings.push(Mapping { addr, size });
+    pub fn add_mapping(&mut self, range: Range<VirtAddr>) {
+        self.mappings.insert(range.start.as_u64()..range.end.as_u64(), Mapping {}).unwrap();
     }
 
     fn offset_page_table(&mut self) -> OffsetPageTable<'_> {
@@ -136,15 +135,8 @@ pub fn page_fault_handler(ctx: &mut IrqContext, addr: VirtAddr) {
     if is_user_address(addr) {
         if let Some(proc) = mach().current_proc() {
             let mut memory = proc.memory.lock();
-            let found = 'found: {
-                for mapping in &memory.address_space.mappings {
-                    if addr >= mapping.addr && addr - mapping.addr < mapping.size as u64 {
-                        break 'found true;
-                    }
-                }
-                false
-            };
-            if found {
+            let mapping = memory.address_space.mappings.span_containing(addr.as_u64());
+            if let Some(_) = mapping {
                 let frame = FrameAllocator.allocate_frame().unwrap();
                 let mut pt = memory.address_space.offset_page_table();
                 unsafe {
