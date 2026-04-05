@@ -72,7 +72,7 @@ const SYSCALL_SENTINEL_INT_NUM: u64 = 256;
 #[unsafe(naked)]
 extern "C" fn int_common_entry() {
     naked_asm!(
-        "test dword ptr [rsp + 8], 3", // check if we came from kernel mode
+        "test dword ptr [rsp + 24], 3", // check if we came from kernel mode
         "jz 2f",
         "swapgs",
         "2:",
@@ -108,7 +108,7 @@ extern "C" fn int_common_entry() {
         "pop r13",
         "pop r14",
         "pop r15",
-        "test dword ptr [rsp + 8], 3", // check if we're going to kernel mode
+        "test dword ptr [rsp + 24], 3", // check if we're going to kernel mode
         "jz 2f",
         "swapgs",
         "2:",
@@ -185,6 +185,7 @@ extern "C" fn syscall_handler(trap: &mut TrapFrame) {
     match trap.rdi {
         0 => print!("{}", trap.rsi as u8 as char),
         1 => thread_sleep(100_000_000),
+        2 => trap.rax = usize::from(mach().current_thread_id()) as u64,
         _ => {}
     }
 }

@@ -269,6 +269,9 @@ pub fn sched(
         current_thread.proc = mach().current_proc();
         next_thread.proc.as_ref().map(|x| x.clone().activate());
 
+        // the saved RSP in kernel TSS has to point at the top of the kernel stack in case the new thread wants to go to usermode
+        unsafe { mach().set_kernel_rsp(next_thread.stack.top()) };
+
         // switch to the new thread
         // we pass the deferred action by reading it from the previous stack
         // (always safe even if exiting since the stack is sure to still exist at this point)

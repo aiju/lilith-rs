@@ -61,6 +61,14 @@ fn os_main() {
         let entry = active_proc.load_elf(data);
         unsafe { active_proc.launch(entry) };
     });
+
+    thread_spawn(|| {
+        let root_proc = Arc::new(Proc::new().unwrap());
+        let active_proc = root_proc.activate();
+        let data = ram_fs().get("cat").unwrap();
+        let entry = active_proc.load_elf(data);
+        unsafe { active_proc.launch(entry) };
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -82,7 +90,7 @@ pub extern "C" fn early_init(multiboot_info: x86_64::PhysAddr) -> memory::Stack 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(kernel_stack: memory::Stack) -> ! {
     // this runs on kernel_stack, ownership of which we pass to the scheduler
-    
+
     let interrupt_guard = sync::interrupt_guard();
 
     unsafe {
