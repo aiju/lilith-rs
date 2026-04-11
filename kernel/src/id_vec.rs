@@ -34,6 +34,12 @@ impl<I, T> IdSparseVec<I, T> {
     }
 }
 
+fn usize_to_index<I: TryFrom<usize>>(index: usize) -> I {
+    index
+        .try_into()
+        .unwrap_or_else(|_| panic!("IdSparseVec overflow"))
+}
+
 impl<I, T> IdSparseVec<I, T>
 where
     I: Copy + TryFrom<usize> + Into<usize>,
@@ -61,9 +67,7 @@ where
             self.list[id.into()] = Some(value);
             id
         } else {
-            let Ok(id) = self.list.len().try_into() else {
-                panic!("IdSparseVec overflow")
-            };
+            let id = usize_to_index(self.list.len());
             self.list.push(Some(value));
             id
         }
@@ -72,5 +76,11 @@ where
         let old = self.list.get_mut(index.into()).unwrap().take();
         self.free.push_back(index);
         old.unwrap()
+    }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (I, &mut T)> {
+        self.list
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, value)| value.as_mut().map(|v| (usize_to_index(index), v)))
     }
 }

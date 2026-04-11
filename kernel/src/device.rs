@@ -1,11 +1,10 @@
 use crate::device::serial::SERIAL1;
 
-trait Writer {
+pub trait Writer {
     fn write(&mut self, data: &[u8]);
 }
 
 pub mod serial;
-pub mod vga;
 
 #[macro_export]
 macro_rules! print {
@@ -31,13 +30,13 @@ impl<T: Writer + ?Sized> core::fmt::Write for FmtWriter<&mut T> {
 pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
 
-    let _ = FmtWriter(&mut *vga::WRITER.lock()).write_fmt(args);
+    let _ = FmtWriter(&mut *crate::draw::WRITER.lock()).write_fmt(args);
     let _ = FmtWriter(&mut *SERIAL1.lock()).write_fmt(args);
 }
 
 pub unsafe fn early_init() {
     unsafe {
         serial::init();
-        vga::init();
+        crate::draw::init();
     }
 }

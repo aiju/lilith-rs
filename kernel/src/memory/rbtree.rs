@@ -85,6 +85,10 @@ impl<T, V> RbNode<T, V> {
     pub fn value(&self) -> &T {
         &self.value
     }
+    // SAFETY: must not do changes that affect ordering or augment values
+    pub unsafe fn value_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
     pub fn into_value(self) -> T {
         self.value
     }
@@ -155,18 +159,30 @@ pub struct OwnedRbNode<T, V> {
     node: *mut RbNode<T, V>,
 }
 
+impl<T, V> OwnedRbNode<T, V> {
+    pub fn value(&self) -> &T {
+        unsafe { &(*self.node).value }
+    }
+    pub fn value_mut(&mut self) -> &mut T {
+        unsafe { &mut (*self.node).value }
+    }
+    pub fn replace_value(&mut self, new_value: T) -> T {
+        core::mem::replace(self.value_mut(), new_value)
+    }
+}
+
 pub struct RbTree<T, V> {
     head: *mut RbNode<T, V>,
 }
 
-unsafe impl<T, V> Sync for RbTree<T, V> {}
-unsafe impl<T, V> Send for RbTree<T, V> {}
-unsafe impl<T, V> Sync for RbNodeRef<'_, T, V> {}
-unsafe impl<T, V> Send for RbNodeRef<'_, T, V> {}
-unsafe impl<T, V> Sync for RbNodeMut<'_, T, V> {}
-unsafe impl<T, V> Send for RbNodeMut<'_, T, V> {}
-unsafe impl<T, V> Sync for OwnedRbNode<T, V> {}
-unsafe impl<T, V> Send for OwnedRbNode<T, V> {}
+unsafe impl<T: Send, V: Send> Send for RbTree<T, V> {}
+unsafe impl<T: Sync, V: Sync> Sync for RbTree<T, V> {}
+unsafe impl<T: Send, V: Send> Send for RbNodeRef<'_, T, V> {}
+unsafe impl<T: Sync, V: Sync> Sync for RbNodeRef<'_, T, V> {}
+unsafe impl<T: Send, V: Send> Send for RbNodeMut<'_, T, V> {}
+unsafe impl<T: Sync, V: Sync> Sync for RbNodeMut<'_, T, V> {}
+unsafe impl<T: Send, V: Send> Send for OwnedRbNode<T, V> {}
+unsafe impl<T: Sync, V: Sync> Sync for OwnedRbNode<T, V> {}
 
 fn color<T, V>(node: *mut RbNode<T, V>) -> Color {
     unsafe { if node.is_null() { Black } else { (*node).color } }
@@ -227,6 +243,9 @@ impl<T, V> RbTree<T, V> {
             tree: self,
             node: unsafe { self.head.as_ref()? },
         })
+    }
+    pub fn is_empty(&self) -> bool {
+        self.head.is_null()
     }
 }
 
@@ -566,7 +585,71 @@ impl<'a, T, V> RbNodeRef<'a, T, V> {
     }
 }
 
+impl<'a, T, V> RbNodeMut<'a, T, V> {
+    pub fn value(&self) -> &'a T {
+        unsafe { &(*self.node).value }
+    }
+    pub fn augment(&self) -> &'a V {
+        unsafe { (*self.node).augment() }
+    }
+    pub fn left(&self) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).left.as_ref()? },
+        })
+    }
+    pub fn right(&self) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).right.as_ref()? },
+        })
+    }
+    pub fn parent(&self) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).parent.as_ref()? },
+        })
+    }
+    pub fn successor(&self) -> Option<RbNodeRef<'_, T, V>> {
+        Some(RbNodeRef {
+            tree: self.tree,
+            node: unsafe { (*self.node).successor()? },
+        })
+    }
+    // SAFETY: any changes you make must not invalidate the ordering or augment values
+    pub unsafe fn value_mut(&mut self) -> &'a mut T {
+        unsafe { &mut (*self.node).value }
+    }
+    pub fn left_mut(&mut self) -> Option<RbNodeMut<'_, T, V>> {
+        Some(RbNodeMut {
+            tree: self.tree,
+            node: unsafe { (*self.node).left.as_mut()? },
+        })
+    }
+    pub fn right_mut(&mut self) -> Option<RbNodeMut<'_, T, V>> {
+        Some(RbNodeMut {
+            tree: self.tree,
+            node: unsafe { (*self.node).right.as_mut()? },
+        })
+    }
+    pub fn parent_mut(&mut self) -> Option<RbNodeMut<'_, T, V>> {
+        Some(RbNodeMut {
+            tree: self.tree,
+            node: unsafe { (*self.node).parent.as_mut()? },
+        })
+    }
+    pub fn successor_mut(&mut self) -> Option<RbNodeMut<'_, T, V>> {
+        Some(RbNodeMut {
+            tree: self.tree,
+            node: unsafe { (*self.node).successor()? },
+        })
+    }
+}
+
 impl<T, V: Augment<T>> RbNodeMut<'_, T, V> {
+    pub fn insert(&mut self, node: OwnedRbNode<T, V>, cmp: impl Fn(&T, &T) -> Ordering) {
+        self.tree.insert(node, cmp);
+    }
     pub fn remove(self) -> OwnedRbNode<T, V> {
         let RbNodeMut { tree, node } = self;
         unsafe { tree.remove_raw(node) };
@@ -592,7 +675,7 @@ impl<T, V> OwnedRbNode<T, V> {
         node
     }
     pub fn into_value(self) -> T {
-        unsafe { Box::from_raw(self.node) }.value
+        unsafe { Box::from_raw(self.into_raw()) }.value
     }
 }
 
@@ -627,6 +710,10 @@ impl<T, V> RbTree<T, V> {
             tree: self,
             node: self.lowest_node_raw()?,
         })
+    }
+    pub fn lowest_node_mut(&mut self) -> Option<RbNodeMut<'_, T, V>> {
+        let node = self.lowest_node_raw()?;
+        Some(RbNodeMut { tree: self, node })
     }
     pub fn iter(&self) -> RbTreeIterator<'_, T, V> {
         RbTreeIterator {
@@ -675,6 +762,97 @@ impl<'a, T, V> Iterator for RbTreeIterator<'a, T, V> {
                 self.node = (*self.node).successor().unwrap_or_default();
                 Some(&*ret)
             }
+        }
+    }
+}
+
+impl<T: Clone, V: Clone> RbNode<T, V> {
+    fn clone_node(&self) -> OwnedRbNode<T, V> {
+        let new_node = OwnedRbNode::new(self.value.clone());
+        let clone_child = |n: &RbNode<T, V>| {
+            let m = n.clone_node();
+            unsafe { (*m.node).parent = new_node.node };
+            m
+        };
+        let left = unsafe { self.left.as_ref().map(clone_child) };
+        let right = unsafe { self.right.as_ref().map(clone_child) };
+        unsafe {
+            (*new_node.node).color = self.color;
+            (*new_node.node).left = left.map(|n| n.into_raw()).unwrap_or_default();
+            (*new_node.node).right = right.map(|n| n.into_raw()).unwrap_or_default();
+            (*new_node.node).augment = self.augment.clone();
+        }
+        new_node
+    }
+}
+
+impl<T: Clone, V: Clone> Clone for RbTree<T, V> {
+    fn clone(&self) -> Self {
+        unsafe {
+            RbTree {
+                head: self
+                    .head
+                    .as_ref()
+                    .map(|n| n.clone_node().into_raw())
+                    .unwrap_or_default(),
+            }
+        }
+    }
+}
+
+impl<T: Eq, V> PartialEq for RbTree<T, V> {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe {
+            let mut ptr_a = self.lowest_node_raw().unwrap_or_default();
+            let mut ptr_b = other.lowest_node_raw().unwrap_or_default();
+            while !ptr_a.is_null() && !ptr_b.is_null() {
+                if (*ptr_a).value != (*ptr_b).value {
+                    return false;
+                }
+                ptr_a = (*ptr_a).successor().unwrap_or_default();
+                ptr_b = (*ptr_b).successor().unwrap_or_default();
+            }
+            ptr_a.is_null() && ptr_b.is_null()
+        }
+    }
+}
+
+impl<T: Eq, V> Eq for RbTree<T, V> {}
+
+impl<T, V: Augment<T>> RbTree<T, V> {
+    /// calls update_fn on every node in the tree.
+    /// 
+    /// SAFETY: updates must not disturb the ordering or augments.
+    pub unsafe fn update_values(&mut self, mut update_fn: impl FnMut(&mut T)) {
+        unsafe {
+            let mut node = self.lowest_node_raw().unwrap_or_default();
+            while !node.is_null() {
+                update_fn(&mut (*node).value);
+                node = (*node).successor().unwrap_or_default();
+            }
+        }
+    }
+
+    /// compact the tree by merging adjacent pairs.
+    /// merge_fn is called on every pair, if it returns true, the right value is removed.
+    /// it is allowed/expected to modify the left value to reflect the merge.
+    ///
+    /// SAFETY: merge_fn must not change left values in a way that disturbs the ordering.
+    /// it should only make changes that disturb augments if it returns true.
+    pub unsafe fn pairwise_merge(&mut self, merge_fn: impl Fn(&mut T, &T) -> bool) {
+        unsafe {
+            let Some(mut node) = self.lowest_node_raw() else {
+                return;
+            };
+            while let Some(succ) = (*node).successor() {
+                if merge_fn((*node).value_mut(), (*succ).value()) {
+                    self.remove_raw(succ);
+                    mark_dirty(node);
+                } else {
+                    node = succ;
+                }
+            }
+            self.update_augments();
         }
     }
 }

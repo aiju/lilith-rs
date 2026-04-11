@@ -8,7 +8,7 @@ mod multiboot;
 mod buddy;
 mod debug_info;
 mod frame_info;
-mod rbtree;
+pub mod rbtree;
 mod slub;
 mod virtual_alloc;
 
@@ -16,7 +16,7 @@ pub use address_space::UserAddressSpace;
 pub use address_space::page_fault_handler;
 pub use bootstrap::init;
 pub use frame_info::{FRAME_SHIFT, FRAME_SIZE};
-pub use multiboot::{MultibootModule, MULTIBOOT_MODULES};
+pub use multiboot::{MultibootModule, MULTIBOOT_MODULES, MULTIBOOT_CMDLINE};
 
 use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR;
 use crate::memory::virtual_alloc::VIRTUAL_ALLOCATOR_END;

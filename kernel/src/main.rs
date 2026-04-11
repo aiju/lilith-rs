@@ -21,6 +21,7 @@ mod tasks;
 mod test;
 mod user;
 mod util;
+mod draw;
 
 extern crate alloc;
 
@@ -47,28 +48,13 @@ fn panic(info: &PanicInfo) -> ! {
 fn os_main() {
     println!("╔═══════════╗\n║ LILITH OS ║\n╚═══════════╝\nBooting...");
 
-    task_spawn(async {
-        loop {
-            println!(":)");
-            task_sleep(1_000_000_000).await;
-        }
-    });
-
-    thread_spawn(|| {
-        let root_proc = Arc::new(Proc::new().unwrap());
-        let active_proc = root_proc.activate();
-        let data = ram_fs().get("cat").unwrap();
-        let entry = active_proc.load_elf(data);
-        unsafe { active_proc.launch(entry) };
-    });
-
-    thread_spawn(|| {
-        let root_proc = Arc::new(Proc::new().unwrap());
-        let active_proc = root_proc.activate();
-        let data = ram_fs().get("cat").unwrap();
-        let entry = active_proc.load_elf(data);
-        unsafe { active_proc.launch(entry) };
-    });
+    let screen_rect = draw::FRAME_BUFFER.lock().rect();
+    let mut screen = draw::Screen::new(screen_rect);
+    let window_a = screen.new_window(draw::Rect::new(100, 100, 200, 200), 0);
+    let window_b = screen.new_window(draw::Rect::new(150, 150, 250, 250), 0);
+    screen.window_mut(window_a).surface_mut().fill(screen_rect, draw::Color::RED);
+    screen.window_mut(window_b).surface_mut().fill(screen_rect, draw::Color::BLUE);
+    screen.update(&mut *draw::FRAME_BUFFER.lock());
 }
 
 #[unsafe(no_mangle)]

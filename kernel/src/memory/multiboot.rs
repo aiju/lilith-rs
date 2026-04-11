@@ -102,6 +102,7 @@ pub struct MultibootModule {
 }
 
 pub static MULTIBOOT_MODULES: BootInit<Vec<MultibootModule>> = unsafe { BootInit::uninit() };
+pub static MULTIBOOT_CMDLINE: BootInit<&'static str> = unsafe { BootInit::uninit() };
 
 impl core::fmt::Debug for MultibootInfoRaw {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -1,5 +1,5 @@
 use crate::memory::boot_alloc::{BootAlloc, NodeSlot, SpanType};
-use crate::memory::multiboot::MultibootInfoRaw;
+use crate::memory::multiboot::{MULTIBOOT_CMDLINE, MultibootInfoRaw};
 #[allow(unused_imports)]
 use crate::prelude::*;
 use crate::sync::BootInit;
@@ -7,6 +7,7 @@ use crate::sync::BootInit;
 use core::ffi::CStr;
 use core::mem::MaybeUninit;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use x86_64::PhysAddr;
 
@@ -210,6 +211,19 @@ fn grab_modules(multiboot_info: &MultibootInfoRaw) -> Vec<MultibootModule> {
     }
 }
 
+fn grab_cmdline(multiboot_info: &MultibootInfoRaw) -> &'static str {
+    if multiboot_info.flags & (1 << 2) != 0 {
+        String::from(
+            get_string(multiboot_info.cmdline)
+                .to_str()
+                .expect("invalid utf-8 in cmdline"),
+        )
+        .leak()
+    } else {
+        ""
+    }
+}
+
 #[unsafe(link_section = ".boot_reclaimable")]
 static mut SPANS: [NodeSlot; 128] = [const { MaybeUninit::uninit() }; 128];
 
@@ -228,6 +242,10 @@ pub unsafe fn init(multiboot_info_addr: PhysAddr) -> (Reclaimer, Stack) {
                     SpanType::Reserved
                 }
             });
+        }
+
+        if multiboot_info.flags & (1 << 2) != 0 {
+            mark_string(&mut boot_alloc, multiboot_info.cmdline);
         }
 
         boot_alloc.mark_reserved(0, 4096);
@@ -281,6 +299,7 @@ pub unsafe fn init(multiboot_info_addr: PhysAddr) -> (Reclaimer, Stack) {
         // we can use the normal allocator now
 
         BootInit::set(&MULTIBOOT_MODULES, grab_modules(multiboot_info));
+        BootInit::set(&MULTIBOOT_CMDLINE, grab_cmdline(multiboot_info));
 
         let kernel_stack = Stack::new().unwrap();
 
